@@ -1,16 +1,20 @@
 import Fastify from 'fastify';
 import helmet from '@fastify/helmet';
+import cors from '@fastify/cors';
 import formbody from '@fastify/formbody';
 import { logger } from './utils/logger.js';
 import { AppError } from './utils/errors.js';
 import healthRoutes from './routes/health.js';
+import webhookRoutes from './routes/webhook.js';
 
 export async function buildApp() {
   const app = Fastify({ loggerInstance: logger });
 
   await app.register(helmet);
+  await app.register(cors, { origin: true });
   await app.register(formbody);
   await app.register(healthRoutes);
+  await app.register(webhookRoutes);
 
   app.setErrorHandler((error, request, reply) => {
     const callId = (request.headers['x-call-id'] as string | undefined) ?? 'unknown';
