@@ -1,0 +1,99 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+generator python {
+  provider                    = "prisma-client-py"
+  interface                   = "asyncio"
+  enable_experimental_decimal = true
+  recursive_type_depth        = 5
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DATABASE_URL_DIRECT")
+}
+
+enum CallOutcome {
+  CONVERTED
+  DROPPED
+  NO_ANSWER
+  ERROR
+}
+
+enum Speaker {
+  USER
+  AGENT
+}
+
+enum Sentiment {
+  POSITIVE
+  NEGATIVE
+  NEUTRAL
+}
+
+model Call {
+  id              String      @id @default(uuid())
+  callId          String      @unique @map("call_id")
+  phoneNumber     String?     @map("phone_number")
+  createdAt       DateTime    @default(now()) @map("created_at")
+  endedAt         DateTime?   @map("ended_at")
+  durationSeconds Int?        @map("duration_seconds")
+  outcome         CallOutcome?
+  finalScore      Int?        @map("final_score")
+  discountGiven   Int         @default(0) @map("discount_given")
+  stageReached    String?     @map("stage_reached")
+  productId       String?     @map("product_id")
+  turns           CallTurn[]
+
+  @@map("calls")
+}
+
+model CallTurn {
+  id              String     @id @default(uuid())
+  callId          String     @map("call_id")
+  turnNumber      Int        @map("turn_number")
+  speaker         Speaker
+  utterance       String
+  objectionType   String?    @map("objection_type")
+  sentiment       Sentiment?
+  scoreBefore     Int        @map("score_before")
+  scoreAfter      Int        @map("score_after")
+  stage           String
+  discountOffered Int?       @map("discount_offered")
+  createdAt       DateTime   @default(now()) @map("created_at")
+  call            Call       @relation(fields: [callId], references: [callId])
+
+  @@index([callId])
+  @@index([callId, turnNumber])
+  @@map("call_turns")
+}
+
+model Product {
+  id              String   @id
+  name            String
+  description     String?
+  price           Decimal  @db.Decimal(10, 2)
+  category        String?
+  tags            String[]
+  isActive        Boolean  @default(true) @map("is_active")
+  embeddingSynced Boolean  @default(false) @map("embedding_synced")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+  metadata        Json?    @map("metadata")
+
+  @@index([category])
+  @@index([isActive])
+  @@index([category, isActive])
+  @@map("products")
+}
+
+model ScoringConfig {
+  key         String   @id
+  value       Decimal
+  description String?
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@map("scoring_config")
+}

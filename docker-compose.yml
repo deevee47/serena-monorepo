@@ -1,0 +1,43 @@
+version: '3.9'
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  node-gateway:
+    build:
+      context: ./node-gateway
+      dockerfile: Dockerfile
+    ports:
+      - '3000:3000'
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./node-gateway/src:/app/src
+    env_file: .env
+
+  fastapi-brain:
+    build:
+      context: ./fastapi-brain
+      dockerfile: Dockerfile
+    ports:
+      - '8000:8000'
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./fastapi-brain/app:/app/app
+    env_file: .env
+
+volumes:
+  redis_data:

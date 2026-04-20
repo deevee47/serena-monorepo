@@ -1,0 +1,22 @@
+version: '3.9'
+
+services:
+  node-gateway:
+    volumes: []
+    environment:
+      - NODE_ENV=production
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: '0.5'
+
+  fastapi-brain:
+    volumes: []
+    environment:
+      - ENVIRONMENT=production
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: '1.0'
