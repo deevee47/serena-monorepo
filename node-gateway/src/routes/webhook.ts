@@ -16,7 +16,7 @@ import {
 } from '../services/session.service.js';
 import {
   classifyObjection,
-  generateResponse,
+  generateResponseStream,
   FALLBACK_RESPONSES,
   type BrainConversationTurn,
 } from '../services/brain.service.js';
@@ -101,9 +101,9 @@ async function processTranscript(callId: string, utterance: string): Promise<voi
     timestamp: t.timestamp.toISOString(),
   }));
 
-  let generatedText: string;
-  try {
-    const generated = await generateResponse({
+  let vapiSayFired = false;
+  const generatedText = await generateResponseStream(
+    {
       call_id: callId,
       utterance,
       stage: nextStage,
@@ -112,27 +112,26 @@ async function processTranscript(callId: string, utterance: string): Promise<voi
       objection_type: classify.objection_type,
       conversation_history: history,
       product_context: productContext,
-    });
-    generatedText = generated.text;
-  } catch (err) {
-    log.error({ err }, 'generateResponse threw — using fallback text');
-    generatedText = FALLBACK_RESPONSES[nextStage] ?? 'Give me just a moment.';
-  }
+    },
+    (chunk) => {
+      // Fire Vapi /say on the first chunk for fast time-to-first-word
+      if (!vapiSayFired) {
+        vapiSayFired = true;
+        got
+          .post(`https://api.vapi.ai/call/${callId}/say`, {
+            headers: { Authorization: `Bearer ${config.VAPI_API_KEY}` },
+            json: { message: chunk },
+          })
+          .catch((err) => log.error({ err }, 'Vapi say (first chunk) failed'));
+      }
+    },
+  );
 
   await updateSession(callId, stageUpdates);
 
   const now = new Date();
   await appendTurn(callId, { speaker: 'USER', utterance, timestamp: now, objectionType: classify.objection_type });
   await appendTurn(callId, { speaker: 'AGENT', utterance: generatedText, timestamp: new Date() });
-
-  // Inject response text into the live Vapi call (fire-and-forget)
-  // Using /say to trigger TTS speech. Fallback attempt with /message if /say doesn't exist.
-  got
-    .post(`https://api.vapi.ai/call/${callId}/say`, {
-      headers: { Authorization: `Bearer ${config.VAPI_API_KEY}` },
-      json: { message: generatedText },
-    })
-    .catch((err) => log.error({ err }, 'Vapi say failed'));
 
   // Non-blocking DB writes
   const turnBase = { scoreBefore: session.score, scoreAfter: newScore, stage: nextStage };
