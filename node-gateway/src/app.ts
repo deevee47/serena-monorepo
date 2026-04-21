@@ -4,12 +4,21 @@ import cors from '@fastify/cors';
 import formbody from '@fastify/formbody';
 import { logger } from './utils/logger.js';
 import { AppError } from './utils/errors.js';
+import { redis } from './lib/redis.js';
 import healthRoutes from './routes/health.js';
 import webhookRoutes from './routes/webhook.js';
 import callsRoutes from './routes/calls.js';
 import vapiLlmRoutes from './routes/vapi-llm.js';
 
 export async function buildApp() {
+  // Verify Redis is reachable before accepting traffic
+  try {
+    await redis.ping();
+  } catch (err) {
+    logger.error({ err }, 'Redis is unavailable — cannot start');
+    process.exit(1);
+  }
+
   const app = Fastify({ loggerInstance: logger });
 
   await app.register(helmet);

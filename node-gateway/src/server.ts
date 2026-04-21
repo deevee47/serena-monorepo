@@ -1,11 +1,13 @@
 import { buildApp } from './app.js';
 import { config } from './config/env.js';
 import { logger } from './utils/logger.js';
+import { redis } from './lib/redis.js';
 
 const app = await buildApp();
 
 const shutdown = async () => {
   await app.close();
+  redis.close();
   process.exit(0);
 };
 

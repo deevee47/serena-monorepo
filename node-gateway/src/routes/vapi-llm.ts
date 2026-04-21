@@ -55,10 +55,10 @@ export default async function vapiLlmRoutes(app: FastifyInstance) {
     const lastUserMsg = [...messages].reverse().find((m) => m.role === 'user');
     const utterance = lastUserMsg?.content ?? '';
 
-    let session = getSession(callId);
+    let session = await getSession(callId);
     if (!session) {
       const productId = (call?.metadata?.['product_id'] as string | undefined) ?? 'prod-001';
-      session = createSession({ callId, phoneNumber, productId });
+      session = await createSession({ callId, phoneNumber, productId });
       log.info({ productId }, 'vapi-llm: session created');
     }
 
@@ -73,8 +73,8 @@ export default async function vapiLlmRoutes(app: FastifyInstance) {
     const newScore = calculateScoreAfterTurn(session, classify.objection_type, classify.sentiment);
     const updatedObjections = [...session.objectionsEncountered, classify.objection_type];
 
-    updateSession(callId, { score: newScore, objectionsEncountered: updatedObjections });
-    const current = getSession(callId)!;
+    await updateSession(callId, { score: newScore, objectionsEncountered: updatedObjections });
+    const current = (await getSession(callId))!;
     const nextStage = getNextStage(current);
 
     const stageUpdates: Parameters<typeof updateSession>[1] = { stage: nextStage };
@@ -89,7 +89,7 @@ export default async function vapiLlmRoutes(app: FastifyInstance) {
     if (detectFollowUpRequest(utterance)) stageUpdates.followUpRequested = true;
 
     const product = getProductById(current.currentProductId);
-    const rawHistory = getRecentHistory(callId, 4);
+    const rawHistory = await getRecentHistory(callId, 4);
     const history: BrainConversationTurn[] = rawHistory.map((t) => ({
       speaker: t.speaker,
       utterance: t.utterance,
@@ -114,10 +114,10 @@ export default async function vapiLlmRoutes(app: FastifyInstance) {
       generatedText = FALLBACK_RESPONSES[nextStage] ?? 'Give me just a moment.';
     }
 
-    updateSession(callId, stageUpdates);
+    await updateSession(callId, stageUpdates);
     const now = new Date();
-    appendTurn(callId, { speaker: 'USER', utterance, timestamp: now, objectionType: classify.objection_type });
-    appendTurn(callId, { speaker: 'AGENT', utterance: generatedText, timestamp: new Date() });
+    await appendTurn(callId, { speaker: 'USER', utterance, timestamp: now, objectionType: classify.objection_type });
+    await appendTurn(callId, { speaker: 'AGENT', utterance: generatedText, timestamp: new Date() });
 
     const turnBase = { scoreBefore: session.score, scoreAfter: newScore, stage: nextStage };
     insertCallTurn(callId, { turnNumber: session.turnCount + 1, speaker: 'USER', utterance, objectionType: classify.objection_type, sentiment: classify.sentiment, discountOffered: discountAmount || undefined, ...turnBase }).catch((err) => log.error({ err }, 'DB insert failed'));

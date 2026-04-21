@@ -45,7 +45,7 @@ async function processTranscript(callId: string, utterance: string): Promise<voi
 
   let session;
   try {
-    session = getSessionOrThrow(callId);
+    session = await getSessionOrThrow(callId);
   } catch {
     log.warn('processTranscript: session not found, skipping');
     return;
@@ -69,8 +69,8 @@ async function processTranscript(callId: string, utterance: string): Promise<voi
 
   const updatedObjections = [...session.objectionsEncountered, classify.objection_type];
 
-  updateSession(callId, { score: newScore, objectionsEncountered: updatedObjections });
-  const currentSession = getSessionOrThrow(callId);
+  await updateSession(callId, { score: newScore, objectionsEncountered: updatedObjections });
+  const currentSession = await getSessionOrThrow(callId);
 
   const nextStage = getNextStage(currentSession);
 
@@ -94,7 +94,7 @@ async function processTranscript(callId: string, utterance: string): Promise<voi
   const product = getProductById(currentSession.currentProductId);
   const productContext = product ? toProductContext(product) : null;
 
-  const rawHistory = getRecentHistory(callId, 4);
+  const rawHistory = await getRecentHistory(callId, 4);
   const history: BrainConversationTurn[] = rawHistory.map((t) => ({
     speaker: t.speaker,
     utterance: t.utterance,
@@ -119,11 +119,11 @@ async function processTranscript(callId: string, utterance: string): Promise<voi
     generatedText = FALLBACK_RESPONSES[nextStage] ?? 'Give me just a moment.';
   }
 
-  updateSession(callId, stageUpdates);
+  await updateSession(callId, stageUpdates);
 
   const now = new Date();
-  appendTurn(callId, { speaker: 'USER', utterance, timestamp: now, objectionType: classify.objection_type });
-  appendTurn(callId, { speaker: 'AGENT', utterance: generatedText, timestamp: new Date() });
+  await appendTurn(callId, { speaker: 'USER', utterance, timestamp: now, objectionType: classify.objection_type });
+  await appendTurn(callId, { speaker: 'AGENT', utterance: generatedText, timestamp: new Date() });
 
   // Inject response text into the live Vapi call (fire-and-forget)
   // Using /say to trigger TTS speech. Fallback attempt with /message if /say doesn't exist.
@@ -212,7 +212,7 @@ export default async function webhookRoutes(app: FastifyInstance) {
       }
 
       const phoneNumber = (event.message.call as { customer?: { number?: string } }).customer?.number ?? 'unknown';
-      const session = createSession({ callId, phoneNumber, productId });
+      const session = await createSession({ callId, phoneNumber, productId });
 
       createCallRecord(session).catch((err) => log.error({ err }, 'createCallRecord failed'));
 
@@ -240,7 +240,7 @@ export default async function webhookRoutes(app: FastifyInstance) {
 
     // ── end-of-call-report ────────────────────────────────────────────────
     if (type === 'end-of-call-report') {
-      const session = getSession(callId);
+      const session = await getSession(callId);
       if (!session) {
         log.warn('end-of-call-report: session not found');
         return reply.send({});
@@ -250,7 +250,7 @@ export default async function webhookRoutes(app: FastifyInstance) {
         session.stage === ConversationStage.CLOSE && session.score >= 60 ? 'CONVERTED' : 'DROPPED';
 
       const report = event.message as { durationSeconds?: number };
-      endSession(callId);
+      await endSession(callId);
 
       updateCallRecord(callId, {
         endedAt: new Date(),
@@ -261,7 +261,7 @@ export default async function webhookRoutes(app: FastifyInstance) {
         durationSeconds: report.durationSeconds,
       }).catch((err) => log.error({ err }, 'updateCallRecord failed'));
 
-      deleteSession(callId);
+      await deleteSession(callId);
       callLocks.delete(callId);
 
       log.info({ outcome, finalScore: session.score }, 'Call ended');
@@ -275,7 +275,7 @@ export default async function webhookRoutes(app: FastifyInstance) {
   if (config.NODE_ENV === 'development') {
     app.get('/debug/session/:callId', async (request: FastifyRequest, reply: FastifyReply) => {
       const { callId } = request.params as { callId: string };
-      const session = getSession(callId);
+      const session = await getSession(callId);
       return reply.send(session ?? { error: 'Session not found' });
     });
   }

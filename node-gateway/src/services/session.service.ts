@@ -1,12 +1,46 @@
+import { redis } from '../lib/redis.js';
 import { ConversationStage } from '../types/session.types.js';
 import type { CallSession, ConversationTurn, SessionCreateInput } from '../types/session.types.js';
 import { AppError, ErrorCodes } from '../utils/errors.js';
 
-// TODO: Replace with Redis. Key format: `session:{callId}`. TTL: 1h.
-// Serialization: JSON.stringify/parse with Date revival (handle Date fields explicitly).
-const sessions = new Map<string, CallSession>();
+const SESSION_TTL = 7200; // 2 hours
+const key = (callId: string) => `session:${callId}`;
 
-export function createSession(input: SessionCreateInput): CallSession {
+// Serialized form — Date fields stored as ISO strings
+type SerializedTurn = Omit<ConversationTurn, 'timestamp'> & { timestamp: string };
+type SerializedSession = Omit<CallSession, 'createdAt' | 'lastUpdatedAt' | 'conversationHistory'> & {
+  createdAt: string;
+  lastUpdatedAt: string;
+  conversationHistory: SerializedTurn[];
+};
+
+function serialize(session: CallSession): string {
+  const s: SerializedSession = {
+    ...session,
+    createdAt: session.createdAt.toISOString(),
+    lastUpdatedAt: session.lastUpdatedAt.toISOString(),
+    conversationHistory: session.conversationHistory.map((t) => ({
+      ...t,
+      timestamp: t.timestamp.toISOString(),
+    })),
+  };
+  return JSON.stringify(s);
+}
+
+function deserialize(raw: string): CallSession {
+  const s = JSON.parse(raw) as SerializedSession;
+  return {
+    ...s,
+    createdAt: new Date(s.createdAt),
+    lastUpdatedAt: new Date(s.lastUpdatedAt),
+    conversationHistory: s.conversationHistory.map((t) => ({
+      ...t,
+      timestamp: new Date(t.timestamp),
+    })),
+  };
+}
+
+export async function createSession(input: SessionCreateInput): Promise<CallSession> {
   const now = new Date();
   const session: CallSession = {
     callId: input.callId,
@@ -26,55 +60,54 @@ export function createSession(input: SessionCreateInput): CallSession {
     lastUpdatedAt: now,
     isActive: true,
   };
-  // TODO: Replace with Redis SETEX `session:{callId}` 3600 JSON.stringify(session)
-  sessions.set(input.callId, session);
+  await redis.set(key(input.callId), serialize(session), 'EX', SESSION_TTL);
   return session;
 }
 
-export function getSession(callId: string): CallSession | null {
-  // TODO: Replace with Redis GET `session:{callId}` + JSON.parse with Date revival
-  return sessions.get(callId) ?? null;
+export async function getSession(callId: string): Promise<CallSession | null> {
+  const raw = await redis.get(key(callId));
+  if (!raw) return null;
+  await redis.expire(key(callId), SESSION_TTL);
+  return deserialize(raw as string);
 }
 
-export function getSessionOrThrow(callId: string): CallSession {
-  const session = getSession(callId);
+export async function getSessionOrThrow(callId: string): Promise<CallSession> {
+  const session = await getSession(callId);
   if (!session) {
     throw new AppError(404, ErrorCodes.SESSION_NOT_FOUND, `Session not found for call ${callId}`);
   }
   return session;
 }
 
-export function updateSession(callId: string, updates: Partial<CallSession>): CallSession {
-  const session = getSessionOrThrow(callId);
+export async function updateSession(callId: string, updates: Partial<CallSession>): Promise<CallSession> {
+  // GET-merge-SET is not atomic.
+  // TODO: Use Redis MULTI/EXEC or Lua script for atomicity in multi-instance deployment.
+  const session = await getSessionOrThrow(callId);
   const updated: CallSession = { ...session, ...updates, lastUpdatedAt: new Date() };
-  // TODO: Replace with Redis SETEX `session:{callId}` 3600 JSON.stringify(updated)
-  sessions.set(callId, updated);
+  await redis.set(key(callId), serialize(updated), 'EX', SESSION_TTL);
   return updated;
 }
 
-export function appendTurn(callId: string, turn: ConversationTurn): void {
-  const session = getSessionOrThrow(callId);
+export async function appendTurn(callId: string, turn: ConversationTurn): Promise<void> {
+  const session = await getSessionOrThrow(callId);
   const updated: CallSession = {
     ...session,
     conversationHistory: [...session.conversationHistory, turn],
     turnCount: session.turnCount + 1,
     lastUpdatedAt: new Date(),
   };
-  // TODO: Replace with Redis — append to list key `turns:{callId}`, INCR `turncount:{callId}`
-  sessions.set(callId, updated);
+  await redis.set(key(callId), serialize(updated), 'EX', SESSION_TTL);
 }
 
-export function getRecentHistory(callId: string, n: number = 4): ConversationTurn[] {
-  const session = getSessionOrThrow(callId);
-  // TODO: Replace with Redis LRANGE `turns:{callId}` -n -1 + JSON.parse
+export async function getRecentHistory(callId: string, n: number = 4): Promise<ConversationTurn[]> {
+  const session = await getSessionOrThrow(callId);
   return session.conversationHistory.slice(-n);
 }
 
-export function endSession(callId: string): CallSession {
+export async function endSession(callId: string): Promise<CallSession> {
   return updateSession(callId, { isActive: false });
 }
 
-export function deleteSession(callId: string): void {
-  // TODO: Replace with Redis DEL `session:{callId}` `turns:{callId}` `turncount:{callId}`
-  sessions.delete(callId);
+export async function deleteSession(callId: string): Promise<void> {
+  await redis.del(key(callId));
 }
