@@ -1,10 +1,28 @@
-from fastapi import APIRouter
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Request
+
+from app.models.requests import ClassifyObjectionRequest
+from app.models.responses import ClassifyObjectionResponse
+from app.services.classifier import classify_objection
+from app.utils.logger import get_logger
 
 router = APIRouter()
 
 
-@router.post("/classify")
-async def classify() -> JSONResponse:
-    # Phase 3 implementation — stub for Phase 1 auth verification
-    return JSONResponse({"error": "Not yet implemented"}, status_code=501)
+@router.post("/classify", response_model=ClassifyObjectionResponse)
+async def classify(body: ClassifyObjectionRequest, request: Request) -> ClassifyObjectionResponse:
+    log = get_logger(body.call_id)
+    objection_type, sentiment, confidence = await classify_objection(
+        body.utterance, body.stage, body.score, body.call_id
+    )
+    log.info(
+        "classified",
+        utterance=body.utterance[:100],
+        objection_type=objection_type,
+        sentiment=sentiment,
+        confidence=confidence,
+    )
+    return ClassifyObjectionResponse(
+        objection_type=objection_type,
+        sentiment=sentiment,
+        confidence=confidence,
+    )

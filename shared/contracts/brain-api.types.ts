@@ -40,6 +40,7 @@ export interface ClassifyObjectionRequest {
 export interface ClassifyObjectionResponse {
   objection_type: ObjectionType;
   confidence: number; // 0.0 to 1.0
+  sentiment: 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL';
 }
 
 export interface GenerateResponseRequest {
