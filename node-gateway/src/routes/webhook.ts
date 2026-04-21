@@ -173,7 +173,19 @@ export default async function webhookRoutes(app: FastifyInstance) {
     },
   );
 
-  app.post('/webhook', async (request: FastifyRequest, reply: FastifyReply) => {
+  app.post('/webhook', {
+    config: {
+      rateLimit: {
+        max: 10,
+        timeWindow: 10_000,
+        hook: 'preHandler',
+        keyGenerator: (req: FastifyRequest) => {
+          const body = req.body as { message?: { call?: { id?: string } } } | undefined;
+          return body?.message?.call?.id ?? req.ip;
+        },
+      },
+    },
+  }, async (request: FastifyRequest, reply: FastifyReply) => {
     const rawBody = (request as RequestWithRawBody).rawBody;
     if (!rawBody) {
       return reply.status(400).send({ error: 'Missing body' });
