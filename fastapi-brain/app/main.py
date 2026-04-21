@@ -7,8 +7,11 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from prisma import Prisma
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
 from app.config.settings import settings
+from app.lib.limiter import limiter
 from app.middleware.auth import verify_internal_secret
 from app.routes.classify import router as classify_router
 from app.routes.generate import router as generate_router
@@ -43,6 +46,9 @@ app = FastAPI(
     lifespan=lifespan,
     dependencies=[Depends(verify_internal_secret)],
 )
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
 
 
 @app.middleware("http")
