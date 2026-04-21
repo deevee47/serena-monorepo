@@ -2,9 +2,11 @@ import Fastify from 'fastify';
 import helmet from '@fastify/helmet';
 import cors from '@fastify/cors';
 import formbody from '@fastify/formbody';
+import rateLimit from '@fastify/rate-limit';
 import { logger } from './utils/logger.js';
 import { AppError } from './utils/errors.js';
 import { redis } from './lib/redis.js';
+import { BunRedisStore } from './lib/rate-limit-store.js';
 import healthRoutes from './routes/health.js';
 import webhookRoutes from './routes/webhook.js';
 import callsRoutes from './routes/calls.js';
@@ -24,6 +26,20 @@ export async function buildApp() {
   await app.register(helmet);
   await app.register(cors, { origin: true });
   await app.register(formbody);
+  await app.register(rateLimit, {
+    global: true,
+    max: 100,
+    timeWindow: 60_000,
+    store: BunRedisStore,
+    skipOnError: true,
+    keyGenerator: (req) => req.ip,
+    errorResponseBuilder: (_req, context) => ({
+      error: {
+        code: 'RATE_LIMIT_EXCEEDED',
+        message: `Rate limit exceeded. Try again in ${context.after}.`,
+      },
+    }),
+  });
   await app.register(healthRoutes);
   await app.register(webhookRoutes);
   await app.register(callsRoutes);
