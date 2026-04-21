@@ -41,6 +41,17 @@ export type GenerateResponseResponse = {
   text: string;
 };
 
+export type AlternativesRequest = {
+  query: string;
+  exclude_id: string;
+  current_price?: number;
+  top_k?: number;
+};
+
+export type AlternativesResponse = {
+  alternatives: ProductContext[];
+};
+
 export const FALLBACK_RESPONSES: Record<ConversationStage, string> = {
   INTRO: 'Give me just a moment.',
   PITCH: 'Let me think about the best way to explain this.',
@@ -113,4 +124,33 @@ export async function classifyObjection(req: ClassifyObjectionRequest): Promise<
 
 export async function generateResponse(req: GenerateResponseRequest): Promise<GenerateResponseResponse> {
   return generateBreaker.fire(req) as Promise<GenerateResponseResponse>;
+}
+
+async function alternativesFn(req: AlternativesRequest): Promise<AlternativesResponse> {
+  const start = Date.now();
+  try {
+    const result = await client
+      .post('products/alternatives', { json: req })
+      .json<AlternativesResponse>();
+    logger.debug({ endpoint: 'products/alternatives', duration_ms: Date.now() - start }, 'Brain call');
+    return result;
+  } catch (err) {
+    logger.error({ err }, 'Brain alternatives error');
+    if (err instanceof Error && err.name === 'TimeoutError') {
+      throw new AppError(504, ErrorCodes.BRAIN_TIMEOUT, 'Brain timeout on alternatives');
+    }
+    throw new AppError(503, ErrorCodes.BRAIN_UNREACHABLE, 'Brain unreachable on alternatives');
+  }
+}
+
+const alternativesBreaker = new CircuitBreaker(alternativesFn, {
+  timeout: 5000,
+  errorThresholdPercentage: 50,
+  resetTimeout: 30000,
+  volumeThreshold: 5,
+});
+alternativesBreaker.fallback(() => ({ alternatives: [] }));
+
+export async function findProductAlternatives(req: AlternativesRequest): Promise<AlternativesResponse> {
+  return alternativesBreaker.fire(req) as Promise<AlternativesResponse>;
 }

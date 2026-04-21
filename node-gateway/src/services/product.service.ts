@@ -1,5 +1,7 @@
 // Products mirror scripts/seed.ts — keep in sync with seed data
-// TODO: Phase 3 — replace CATALOG with DB query; replace findAlternativeProduct with Pinecone
+// TODO: Step 4.2 — getProductById could query DB instead of CATALOG
+
+import { findProductAlternatives } from './brain.service.js';
 
 export interface Product {
   id: string;
@@ -98,35 +100,32 @@ export function getProductById(productId: string): Product | null {
   return CATALOG.find((p) => p.id === productId && p.isActive) ?? null;
 }
 
-export function findAlternativeProduct(
+export async function findAlternativeProduct(
   currentProductId: string,
   reason: 'PRICE' | 'FEATURE' | 'CATEGORY',
-): Product | null {
-  // TODO: Replace with Pinecone vector search in Phase 3
+): Promise<ProductContext | null> {
   const current = getProductById(currentProductId);
   if (!current) return null;
 
-  const others = CATALOG.filter((p) => p.id !== currentProductId && p.isActive);
+  let query: string;
+  let currentPrice: number | undefined;
 
   if (reason === 'PRICE') {
-    return (
-      others
-        .filter((p) => p.category === current.category && p.price < current.price)
-        .sort((a, b) => b.price - a.price)[0] ?? null
-    );
+    query = `cheaper alternative to ${current.name}`;
+    currentPrice = current.price;
+  } else if (reason === 'FEATURE') {
+    query = `${current.name}: ${current.tags.join(' ')}`;
+  } else {
+    query = 'alternative product in a different category';
   }
 
-  if (reason === 'FEATURE') {
-    const currentTagSet = new Set(current.tags);
-    return (
-      others
-        .map((p) => ({ product: p, overlap: p.tags.filter((t) => currentTagSet.has(t)).length }))
-        .sort((a, b) => b.overlap - a.overlap)[0]?.product ?? null
-    );
-  }
+  const { alternatives } = await findProductAlternatives({
+    query,
+    exclude_id: currentProductId,
+    current_price: currentPrice,
+  });
 
-  // CATEGORY — first active product in a different category
-  return others.find((p) => p.category !== current.category) ?? null;
+  return alternatives[0] ?? null;
 }
 
 export function toProductContext(product: Product): ProductContext {
