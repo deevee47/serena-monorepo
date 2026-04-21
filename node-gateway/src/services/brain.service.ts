@@ -154,3 +154,64 @@ alternativesBreaker.fallback(() => ({ alternatives: [] }));
 export async function findProductAlternatives(req: AlternativesRequest): Promise<AlternativesResponse> {
   return alternativesBreaker.fire(req) as Promise<AlternativesResponse>;
 }
+
+export async function generateResponseStream(
+  req: GenerateResponseRequest,
+  onChunk: (text: string) => void,
+): Promise<string> {
+  const buffer: string[] = [];
+
+  try {
+    const response = await fetch(`${config.FASTAPI_BRAIN_URL}/generate/stream`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Internal-Secret': config.INTERNAL_SERVICE_SECRET,
+        'X-Call-ID': req.call_id,
+      },
+      body: JSON.stringify(req),
+      signal: AbortSignal.timeout(15_000),
+    });
+
+    if (!response.ok || !response.body) {
+      throw new Error(`Stream request failed: ${response.status}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let lineBuffer = '';
+    let finished = false;
+
+    while (!finished) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      lineBuffer += decoder.decode(value, { stream: true });
+      const lines = lineBuffer.split('\n');
+      lineBuffer = lines.pop() ?? '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6).trim();
+        if (data === '[DONE]') { finished = true; break; }
+        try {
+          const parsed = JSON.parse(data) as { text: string };
+          buffer.push(parsed.text);
+          onChunk(parsed.text);
+        } catch {
+          // ignore malformed SSE lines
+        }
+      }
+    }
+
+    const fullText = buffer.join('').trim();
+    return fullText || (FALLBACK_RESPONSES[req.stage] ?? 'Give me just a moment.');
+  } catch (err) {
+    logger.error({ call_id: req.call_id, err }, 'generateResponseStream failed — using buffered partial or fallback');
+    const partial = buffer.join('').trim();
+    if (partial) return partial;
+    const result = await generateResponse(req).catch(() => ({
+      text: FALLBACK_RESPONSES[req.stage] ?? 'Give me just a moment.',
+    }));
+    return result.text;
+  }
+}
