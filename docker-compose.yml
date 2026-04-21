@@ -39,5 +39,17 @@ services:
       - ./fastapi-brain/app:/app/app
     env_file: .env
 
+  node-worker:
+    build:
+      context: ./node-gateway
+      dockerfile: Dockerfile
+    command: bun src/workers.ts
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./node-gateway/src:/app/src
+    env_file: .env
+
 volumes:
   redis_data:

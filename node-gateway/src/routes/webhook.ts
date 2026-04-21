@@ -13,7 +13,6 @@ import {
   appendTurn,
   getRecentHistory,
   endSession,
-  deleteSession,
 } from '../services/session.service.js';
 import {
   classifyObjection,
@@ -30,7 +29,8 @@ import {
   detectFollowUpRequest,
 } from '../services/negotiation.service.js';
 import { getProductById, toProductContext } from '../services/product.service.js';
-import { createCallRecord, updateCallRecord, insertCallTurn } from '../services/db.service.js';
+import { createCallRecord, insertCallTurn } from '../services/db.service.js';
+import { callEndQueue, analyticsQueue, crmQueue } from '../queues/index.js';
 import { ConversationStage, ObjectionType } from '../types/session.types.js';
 
 interface RequestWithRawBody extends FastifyRequest {
@@ -252,16 +252,39 @@ export default async function webhookRoutes(app: FastifyInstance) {
       const report = event.message as { durationSeconds?: number };
       await endSession(callId);
 
-      updateCallRecord(callId, {
-        endedAt: new Date(),
+      const discountGiven =
+        session.discountsOffered.length > 0 ? Math.max(...session.discountsOffered) : 0;
+
+      // Enqueue async post-call jobs — return 200 to Vapi immediately
+      await callEndQueue.add('call-end', {
+        callId,
         outcome,
         finalScore: session.score,
-        discountGiven: session.discountsOffered.length > 0 ? Math.max(...session.discountsOffered) : 0,
+        discountGiven,
         stageReached: session.stage,
+        turnCount: session.turnCount,
+        phoneNumber: session.phoneNumber,
+        productId: session.currentProductId,
         durationSeconds: report.durationSeconds,
-      }).catch((err) => log.error({ err }, 'updateCallRecord failed'));
+      });
 
-      await deleteSession(callId);
+      await analyticsQueue.add('analytics', {
+        callId,
+        outcome,
+        finalScore: session.score,
+        discountGiven,
+        stageReached: session.stage,
+        turnCount: session.turnCount,
+      });
+
+      await crmQueue.add('crm-update', {
+        callId,
+        phoneNumber: session.phoneNumber,
+        outcome,
+        discount: discountGiven,
+        productId: session.currentProductId,
+      });
+
       callLocks.delete(callId);
 
       log.info({ outcome, finalScore: session.score }, 'Call ended');
