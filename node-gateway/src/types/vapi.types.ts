@@ -5,6 +5,7 @@ export interface VapiCallInfo {
   createdAt?: string;
   endedReason?: string;
   duration?: number;
+  metadata?: Record<string, unknown>;
 }
 
 export interface VapiAssistantRequestEvent {
