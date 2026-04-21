@@ -2,7 +2,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from app.models.requests import ObjectionType
+from app.models.requests import ObjectionType, ProductContext
 
 
 class ClassifyObjectionResponse(BaseModel):
@@ -17,3 +17,9 @@ class GenerateResponseResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     text: str
+
+
+class AlternativesResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    alternatives: list[ProductContext]

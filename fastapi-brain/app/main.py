@@ -13,6 +13,7 @@ from app.middleware.auth import verify_internal_secret
 from app.routes.classify import router as classify_router
 from app.routes.generate import router as generate_router
 from app.routes.health import router as health_router
+from app.routes.products import router as products_router
 from app.utils.errors import BrainError
 from app.utils.logger import configure_logging, get_logger
 
@@ -83,3 +84,4 @@ async def brain_error_handler(request: Request, exc: BrainError) -> JSONResponse
 app.include_router(health_router)
 app.include_router(classify_router)
 app.include_router(generate_router)
+app.include_router(products_router)

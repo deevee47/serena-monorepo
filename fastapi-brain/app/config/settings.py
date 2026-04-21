@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     node_gateway_url: str
     internal_service_secret: str
     log_level: str = "info"
-    pinecone_api_key: str | None = None
+    pinecone_api_key: str
     pinecone_index_name: str = "voice-agent-products"
 
     model_config = {"env_file": (".env", "../.env"), "case_sensitive": False, "extra": "ignore"}

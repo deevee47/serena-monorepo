@@ -59,3 +59,12 @@ class GenerateResponseRequest(BaseModel):
     objection_type: ObjectionType | None = None
     conversation_history: list[ConversationTurn]
     product_context: ProductContext | None = None
+
+
+class AlternativesRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    query: str
+    exclude_id: str
+    current_price: float | None = None
+    top_k: int = 3
