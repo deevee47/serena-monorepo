@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Request
 
+from app.lib.limiter import limiter
 from app.models.requests import ClassifyObjectionRequest
 from app.models.responses import ClassifyObjectionResponse
 from app.services.classifier import classify_objection
@@ -9,6 +10,7 @@ router = APIRouter()
 
 
 @router.post("/classify", response_model=ClassifyObjectionResponse)
+@limiter.limit("60/minute")
 async def classify(body: ClassifyObjectionRequest, request: Request) -> ClassifyObjectionResponse:
     log = get_logger(body.call_id)
     objection_type, sentiment, confidence = await classify_objection(

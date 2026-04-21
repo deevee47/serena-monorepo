@@ -1,5 +1,6 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
+from app.lib.limiter import limiter
 from app.models.requests import GenerateResponseRequest
 from app.models.responses import GenerateResponseResponse
 from app.services.llm import generate_response
@@ -10,7 +11,8 @@ router = APIRouter()
 
 
 @router.post("/generate", response_model=GenerateResponseResponse)
-async def generate(body: GenerateResponseRequest) -> GenerateResponseResponse:
+@limiter.limit("60/minute")
+async def generate(body: GenerateResponseRequest, request: Request) -> GenerateResponseResponse:
     log = get_logger(body.call_id)
     system_prompt = build_system_prompt(body)
     messages = build_conversation_messages(body)
