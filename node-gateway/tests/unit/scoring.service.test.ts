@@ -100,6 +100,11 @@ describe('calculateScoreAfterTurn — repeat objections', () => {
     expect(calculateScoreAfterTurn(session, ObjectionType.PRICE)).toBe(35);
   });
 
+  it('does not apply repeat penalty to repeated neutral turns', () => {
+    const session = mockSession({ score: 50, objectionsEncountered: [ObjectionType.NEUTRAL] });
+    expect(calculateScoreAfterTurn(session, ObjectionType.NEUTRAL)).toBe(50);
+  });
+
   it('clamps to 0 when repeat pushes score negative', () => {
     const session = mockSession({
       score: 10,

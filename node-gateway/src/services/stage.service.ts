@@ -21,29 +21,36 @@ function hasRealObjection(session: CallSession): boolean {
   return last !== undefined && REAL_OBJECTIONS.has(last);
 }
 
+function hasPositiveSignal(session: CallSession): boolean {
+  return lastObjection(session) === ObjectionType.POSITIVE_SIGNAL;
+}
+
 export function getNextStage(session: CallSession): ConversationStage {
   const { stage, score, turnCount, discountsOffered, closeAttempted } = session;
 
   switch (stage) {
     case ConversationStage.INTRO:
-      return ConversationStage.PITCH;
+      return turnCount === 0 ? ConversationStage.INTRO : ConversationStage.PITCH;
 
     case ConversationStage.PITCH:
-      if (score >= 80 && turnCount >= 2) return ConversationStage.CLOSE;
-      if (score >= 65 && turnCount >= 2 && lastObjection(session) === ObjectionType.PRICE) {
+      if (hasPositiveSignal(session) && score >= 60 && turnCount >= 4) return ConversationStage.CLOSE;
+      if (lastObjection(session) === ObjectionType.PRICE) {
         return ConversationStage.NEGOTIATION;
       }
-      if (score < 65 || hasRealObjection(session)) return ConversationStage.OBJECTION;
+      if (hasRealObjection(session)) return ConversationStage.OBJECTION;
       return ConversationStage.PITCH;
 
     case ConversationStage.OBJECTION:
       if (score < 20) return ConversationStage.END;
-      if (score >= 40) return ConversationStage.NEGOTIATION;
+      if (lastObjection(session) === ObjectionType.PRICE) return ConversationStage.NEGOTIATION;
+      if (hasPositiveSignal(session) && score >= 50) return ConversationStage.PITCH;
+      if (!hasRealObjection(session) && score >= 40) return ConversationStage.PITCH;
       return ConversationStage.OBJECTION;
 
     case ConversationStage.NEGOTIATION:
-      if (score >= 60) return ConversationStage.CLOSE;
+      if (hasPositiveSignal(session) && score >= 50) return ConversationStage.CLOSE;
       if (score < 25 || discountsOffered.length >= 2) return ConversationStage.END;
+      if (!hasRealObjection(session) && score >= 45) return ConversationStage.PITCH;
       return ConversationStage.NEGOTIATION;
 
     case ConversationStage.CLOSE:

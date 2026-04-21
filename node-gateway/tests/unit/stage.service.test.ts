@@ -31,16 +31,21 @@ function mockSession(overrides: Partial<CallSession> = {}): CallSession {
 }
 
 describe('INTRO transitions', () => {
-  it('INTRO → PITCH always', () => {
-    const session = mockSession({ stage: ConversationStage.INTRO });
+  it('INTRO stays INTRO before the first agent reply', () => {
+    const session = mockSession({ stage: ConversationStage.INTRO, turnCount: 0 });
+    expect(getNextStage(session)).toBe(ConversationStage.INTRO);
+  });
+
+  it('INTRO → PITCH after the opening exchange', () => {
+    const session = mockSession({ stage: ConversationStage.INTRO, turnCount: 2 });
     expect(getNextStage(session)).toBe(ConversationStage.PITCH);
   });
 });
 
 describe('PITCH transitions', () => {
-  it('PITCH → OBJECTION when score < 65', () => {
+  it('PITCH stays PITCH on a low-score neutral turn', () => {
     const session = mockSession({ stage: ConversationStage.PITCH, score: 40 });
-    expect(getNextStage(session)).toBe(ConversationStage.OBJECTION);
+    expect(getNextStage(session)).toBe(ConversationStage.PITCH);
   });
 
   it('PITCH → OBJECTION when real objection raised (score >= 65)', () => {
@@ -52,22 +57,22 @@ describe('PITCH transitions', () => {
     expect(getNextStage(session)).toBe(ConversationStage.OBJECTION);
   });
 
-  it('PITCH → NEGOTIATION when score >= 65, turnCount >= 2, last objection PRICE', () => {
+  it('PITCH → NEGOTIATION when last objection is PRICE', () => {
     const session = mockSession({
       stage: ConversationStage.PITCH,
-      score: 65,
+      score: 35,
       turnCount: 2,
       objectionsEncountered: [ObjectionType.PRICE],
     });
     expect(getNextStage(session)).toBe(ConversationStage.NEGOTIATION);
   });
 
-  it('PITCH → CLOSE when score >= 80 and turnCount >= 2', () => {
+  it('PITCH → CLOSE on a clear positive signal after enough context', () => {
     const session = mockSession({
       stage: ConversationStage.PITCH,
-      score: 80,
-      turnCount: 2,
-      objectionsEncountered: [],
+      score: 62,
+      turnCount: 4,
+      objectionsEncountered: [ObjectionType.POSITIVE_SIGNAL],
     });
     expect(getNextStage(session)).toBe(ConversationStage.CLOSE);
   });
@@ -84,10 +89,11 @@ describe('PITCH transitions', () => {
 });
 
 describe('OBJECTION transitions', () => {
-  it('OBJECTION → NEGOTIATION when score >= 40', () => {
+  it('OBJECTION → NEGOTIATION when the active objection is PRICE', () => {
     const session = mockSession({
       stage: ConversationStage.OBJECTION,
       score: 40,
+      objectionsEncountered: [ObjectionType.PRICE],
     });
     expect(getNextStage(session)).toBe(ConversationStage.NEGOTIATION);
   });
@@ -104,16 +110,27 @@ describe('OBJECTION transitions', () => {
     const session = mockSession({
       stage: ConversationStage.OBJECTION,
       score: 30,
+      objectionsEncountered: [ObjectionType.TRUST],
     });
     expect(getNextStage(session)).toBe(ConversationStage.OBJECTION);
+  });
+
+  it('OBJECTION → PITCH when the latest turn is neutral and score has recovered', () => {
+    const session = mockSession({
+      stage: ConversationStage.OBJECTION,
+      score: 45,
+      objectionsEncountered: [ObjectionType.TRUST, ObjectionType.NEUTRAL],
+    });
+    expect(getNextStage(session)).toBe(ConversationStage.PITCH);
   });
 });
 
 describe('NEGOTIATION transitions', () => {
-  it('NEGOTIATION → CLOSE when score >= 60', () => {
+  it('NEGOTIATION → CLOSE on a positive signal', () => {
     const session = mockSession({
       stage: ConversationStage.NEGOTIATION,
       score: 60,
+      objectionsEncountered: [ObjectionType.PRICE, ObjectionType.POSITIVE_SIGNAL],
     });
     expect(getNextStage(session)).toBe(ConversationStage.CLOSE);
   });
@@ -140,6 +157,7 @@ describe('NEGOTIATION transitions', () => {
       stage: ConversationStage.NEGOTIATION,
       score: 45,
       discountsOffered: [5],
+      objectionsEncountered: [ObjectionType.PRICE],
     });
     expect(getNextStage(session)).toBe(ConversationStage.NEGOTIATION);
   });

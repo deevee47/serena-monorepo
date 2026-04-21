@@ -14,6 +14,12 @@ const SCORE_DELTAS: Record<ObjectionType, number> = {
 };
 
 const REPEAT_PENALTY = -10; // tune after 100 calls
+const REPEAT_PENALTY_TYPES: ReadonlySet<ObjectionType> = new Set([
+  ObjectionType.PRICE,
+  ObjectionType.TRUST,
+  ObjectionType.CONFUSION,
+  ObjectionType.TIMING,
+]);
 
 export function isRepeatObjection(session: CallSession, objectionType: ObjectionType): boolean {
   return session.objectionsEncountered.includes(objectionType);
@@ -30,7 +36,7 @@ export function calculateScoreAfterTurn(
 ): number {
   let delta = SCORE_DELTAS[objectionType];
 
-  if (isRepeatObjection(session, objectionType)) {
+  if (REPEAT_PENALTY_TYPES.has(objectionType) && isRepeatObjection(session, objectionType)) {
     delta += REPEAT_PENALTY;
   }
 

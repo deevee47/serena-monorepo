@@ -12,11 +12,13 @@ export default [
     languageOptions: {
       parser: tsParser,
       parserOptions: { project: './tsconfig.json' },
-      globals: { ...globals.node },
+      globals: { ...globals.node, Bun: 'readonly' },
     },
     rules: {
       ...tsPlugin.configs.recommended.rules,
       '@typescript-eslint/no-explicit-any': 'warn',
+      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+      'no-redeclare': 'off',
     },
   },
   {
@@ -29,6 +31,8 @@ export default [
     rules: {
       ...tsPlugin.configs.recommended.rules,
       '@typescript-eslint/no-explicit-any': 'warn',
+      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+      'no-redeclare': 'off',
     },
   },
   prettierConfig,
