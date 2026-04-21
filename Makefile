@@ -23,7 +23,7 @@ lint:
 
 prisma-generate:
 	bunx prisma generate --generator client
-	cd fastapi-brain && uv run prisma generate --schema ../prisma/schema.prisma
+	cd fastapi-brain && uv run prisma py generate --schema ../prisma/schema.prisma --generator python
 
 migrate:
 	bunx prisma migrate deploy

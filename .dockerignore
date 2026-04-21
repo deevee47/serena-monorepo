@@ -1,0 +1,10 @@
+.git
+.github
+.claude
+.env
+node_modules
+**/__pycache__
+**/.pytest_cache
+**/*.pyc
+fastapi-brain/.venv
+fastapi-brain/tests

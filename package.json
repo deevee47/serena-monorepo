@@ -5,11 +5,11 @@
   "type": "module",
   "workspaces": ["node-gateway"],
   "scripts": {
-    "dev": "concurrently \"bun run --cwd node-gateway dev\" \"cd fastapi-brain && uv run uvicorn app.main:app --reload --port 8000\"",
+    "dev": "bun run db:generate && concurrently --kill-others-on-fail \"bun run --cwd node-gateway dev\" \"cd fastapi-brain && uv run uvicorn app.main:app --reload --port 8000\"",
     "lint": "bun run --cwd node-gateway lint",
     "test": "bun run --cwd node-gateway test && cd fastapi-brain && uv run pytest",
     "typecheck": "bun run --cwd node-gateway typecheck",
-    "db:generate": "bunx prisma generate --generator client && cd fastapi-brain && uv run prisma generate --schema ../prisma/schema.prisma",
+    "db:generate": "bunx prisma generate --generator client && cd fastapi-brain && uv run prisma py generate --schema ../prisma/schema.prisma --generator python",
     "db:migrate:dev": "bunx prisma migrate dev",
     "db:migrate": "bunx prisma migrate deploy",
     "db:studio": "bunx prisma studio",

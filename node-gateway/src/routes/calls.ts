@@ -44,7 +44,7 @@ export default async function callsRoutes(app: FastifyInstance) {
         headers: { Authorization: `Bearer ${config.VAPI_API_KEY}` },
         json: {
           assistantId: config.VAPI_ASSISTANT_ID,
-          customer: { number: phone_number },
+          customer: { phoneNumber: phone_number },
           metadata: { product_id, trigger_reason, ...metadata },
         },
       }).json<{ id: string }>();

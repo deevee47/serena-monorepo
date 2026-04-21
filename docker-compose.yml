@@ -28,8 +28,8 @@ services:
 
   fastapi-brain:
     build:
-      context: ./fastapi-brain
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: fastapi-brain/Dockerfile
     ports:
       - '8000:8000'
     depends_on:
@@ -37,6 +37,7 @@ services:
         condition: service_healthy
     volumes:
       - ./fastapi-brain/app:/app/app
+      - ./prisma:/app/prisma:ro
     env_file: .env
 
   node-worker:

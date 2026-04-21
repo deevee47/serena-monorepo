@@ -1,5 +1,10 @@
-import 'dotenv/config';
+import { config as loadEnv } from 'dotenv';
+import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
+
+// Load a service-local .env first, then fall back to the repo root .env for monorepo dev.
+loadEnv();
+loadEnv({ path: fileURLToPath(new URL('../../.env', import.meta.url)) });
 
 const envSchema = z.object({
   PORT: z.coerce.number().default(3000),

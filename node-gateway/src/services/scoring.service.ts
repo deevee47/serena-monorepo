@@ -1,25 +1,68 @@
 import { ObjectionType } from '../types/session.types.js';
 import type { CallSession } from '../types/session.types.js';
+import { prisma } from '../lib/prisma.js';
+import { logger } from '../utils/logger.js';
 
 export type Sentiment = 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL';
 
-// Tune based on real call outcome data after 100 calls
+// Hardcoded fallbacks used when scoring_config table has no row for a given key
 const SCORE_DELTAS: Record<ObjectionType, number> = {
-  PRICE: -15,         // tune after 100 calls
-  TRUST: -20,         // tune after 100 calls
-  CONFUSION: -10,     // tune after 100 calls
-  TIMING: -12,        // tune after 100 calls
-  POSITIVE_SIGNAL: 12, // tune after 100 calls
-  NEUTRAL: 0,         // tune after 100 calls
+  PRICE: -15,
+  TRUST: -20,
+  CONFUSION: -10,
+  TIMING: -12,
+  POSITIVE_SIGNAL: 12,
+  NEUTRAL: 0,
 };
 
-const REPEAT_PENALTY = -10; // tune after 100 calls
+const REPEAT_PENALTY = -10;
 const REPEAT_PENALTY_TYPES: ReadonlySet<ObjectionType> = new Set([
   ObjectionType.PRICE,
   ObjectionType.TRUST,
   ObjectionType.CONFUSION,
   ObjectionType.TIMING,
 ]);
+
+const DB_KEY: Record<ObjectionType, string> = {
+  PRICE: 'delta_price',
+  TRUST: 'delta_trust',
+  CONFUSION: 'delta_confusion',
+  TIMING: 'delta_timing',
+  POSITIVE_SIGNAL: 'delta_positive_signal',
+  NEUTRAL: 'delta_neutral',
+};
+const REPEAT_PENALTY_DB_KEY = 'repeat_penalty';
+
+const configCache = new Map<string, number>();
+
+async function loadScoringConfig(): Promise<void> {
+  try {
+    const rows = await prisma.scoringConfig.findMany();
+    for (const row of rows) {
+      configCache.set(row.key, Number(row.value));
+    }
+    logger.debug({ keys: rows.map((r) => r.key) }, 'Scoring config refreshed');
+  } catch (err) {
+    logger.error({ err }, 'Failed to load scoring config from DB — using cached/hardcoded values');
+  }
+}
+
+export async function refreshScoringConfig(): Promise<void> {
+  await loadScoringConfig();
+}
+
+export async function initScoringConfig(): Promise<void> {
+  await loadScoringConfig();
+  setInterval(() => { void loadScoringConfig(); }, 5 * 60 * 1000);
+}
+
+function getDelta(objectionType: ObjectionType): number {
+  return configCache.get(DB_KEY[objectionType]) ?? SCORE_DELTAS[objectionType];
+}
+
+function getRepeatPenalty(): number {
+  return configCache.get(REPEAT_PENALTY_DB_KEY) ?? REPEAT_PENALTY;
+}
 
 export function isRepeatObjection(session: CallSession, objectionType: ObjectionType): boolean {
   return session.objectionsEncountered.includes(objectionType);
@@ -34,10 +77,10 @@ export function calculateScoreAfterTurn(
   objectionType: ObjectionType,
   sentiment: Sentiment = 'NEUTRAL',
 ): number {
-  let delta = SCORE_DELTAS[objectionType];
+  let delta = getDelta(objectionType);
 
   if (REPEAT_PENALTY_TYPES.has(objectionType) && isRepeatObjection(session, objectionType)) {
-    delta += REPEAT_PENALTY;
+    delta += getRepeatPenalty();
   }
 
   // Positive sentiment halves negative deltas only — never amplifies positive ones
