@@ -109,3 +109,7 @@ class DecideRequest(BaseModel):
     utterance_length_trend: float | None = None
     filler_density: float | None = None
     response_latency_ms: int | None = None
+    # When True, the rules engine will pick SEND_*_WHATSAPP tactics on close /
+    # graceful-exit instead of pure verbal moves. Default False so existing
+    # callers see no behavior change.
+    whatsapp_available: bool = False

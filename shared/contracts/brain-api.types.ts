@@ -90,7 +90,10 @@ export type Tactic =
   | 'TIME_CAPTURE'
   | 'TRIAL_CLOSE'
   | 'ASSUMPTIVE_CLOSE'
-  | 'GRACEFUL_EXIT';
+  | 'GRACEFUL_EXIT'
+  // Tool-call tactics — gateway dispatches the matching service when picked.
+  | 'SEND_CHECKOUT_LINK_WHATSAPP'
+  | 'SEND_PRODUCT_INFO_WHATSAPP';
 
 export interface DecideRequest {
   call_id: string;
@@ -108,6 +111,9 @@ export interface DecideRequest {
   utterance_length_trend?: number | null; // tokens/turn slope across recent USER utterances
   filler_density?: number | null; // 0.0–1.0 ratio of filler tokens
   response_latency_ms?: number | null; // most recent USER reply pre-response latency
+  // True when the agent has a real channel to follow through on (WhatsApp).
+  // Upgrades close / graceful-exit tactics into actual SEND_*_WHATSAPP moves.
+  whatsapp_available?: boolean;
 }
 
 export interface DecideResponse {

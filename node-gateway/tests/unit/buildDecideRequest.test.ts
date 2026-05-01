@@ -38,6 +38,8 @@ describe('buildDecideRequest', () => {
       utterance_length_trend: null,
       filler_density: null,
       response_latency_ms: null,
+      // whatsapp_available defaults to false unless the caller opts in.
+      whatsapp_available: false,
     });
   });
 

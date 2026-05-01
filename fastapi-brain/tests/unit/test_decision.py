@@ -338,3 +338,78 @@ def test_no_signals_means_legacy_behavior_unchanged():
     # Sanity: empty SignalSnapshot must produce the same decision as before B-5.
     d = decide(_p(objection_type=ObjectionType.PRICE, signals=SignalSnapshot()))
     assert d.tactic == Tactic.ISOLATE
+
+
+# ─── WhatsApp tool routing ───────────────────────────────────────────────────
+
+def test_buying_signal_with_whatsapp_picks_send_checkout_link():
+    d = decide(_p(
+        objection_type=ObjectionType.POSITIVE_SIGNAL,
+        objection_subtype="ready_to_buy",
+        whatsapp_available=True,
+    ))
+    assert d.tactic == Tactic.SEND_CHECKOUT_LINK_WHATSAPP
+
+
+def test_buying_signal_without_whatsapp_falls_back_to_assumptive_close():
+    d = decide(_p(
+        objection_type=ObjectionType.POSITIVE_SIGNAL,
+        objection_subtype="ready_to_buy",
+        whatsapp_available=False,
+    ))
+    assert d.tactic == Tactic.ASSUMPTIVE_CLOSE
+
+
+def test_close_stage_with_whatsapp_picks_send_checkout_link():
+    d = decide(_p(stage=ConversationStage.CLOSE, score=65, whatsapp_available=True))
+    assert d.tactic == Tactic.SEND_CHECKOUT_LINK_WHATSAPP
+
+
+def test_high_score_assumptive_close_with_whatsapp_picks_send_checkout():
+    d = decide(_p(
+        objection_type=ObjectionType.POSITIVE_SIGNAL,
+        objection_subtype="agreement",
+        score=85,
+        whatsapp_available=True,
+    ))
+    assert d.tactic == Tactic.SEND_CHECKOUT_LINK_WHATSAPP
+
+
+def test_graceful_exit_with_whatsapp_and_recoverable_score_picks_send_info():
+    # Low score but not zero → leave a usable trail instead of pure verbal exit.
+    d = decide(_p(
+        score=18,
+        turn_count=8,
+        objection_type=ObjectionType.PRICE,
+        prior_objection_types=[ObjectionType.PRICE] * 3,
+        whatsapp_available=True,
+    ))
+    assert d.tactic == Tactic.SEND_PRODUCT_INFO_WHATSAPP
+
+
+def test_graceful_exit_with_whatsapp_but_very_low_score_still_exits():
+    d = decide(_p(
+        score=10,
+        turn_count=8,
+        objection_type=ObjectionType.PRICE,
+        prior_objection_types=[ObjectionType.PRICE] * 3,
+        whatsapp_available=True,
+    ))
+    assert d.tactic == Tactic.GRACEFUL_EXIT
+
+
+def test_end_stage_with_whatsapp_and_recoverable_score_sends_product_info():
+    d = decide(_p(stage=ConversationStage.END, score=35, whatsapp_available=True))
+    assert d.tactic == Tactic.SEND_PRODUCT_INFO_WHATSAPP
+
+
+def test_end_stage_with_whatsapp_but_low_score_still_exits():
+    d = decide(_p(stage=ConversationStage.END, score=20, whatsapp_available=True))
+    assert d.tactic == Tactic.GRACEFUL_EXIT
+
+
+def test_whatsapp_does_not_affect_objection_handling():
+    # WhatsApp upgrades only fire on close / exit paths — should not affect
+    # ordinary objection-handling tactics like ISOLATE.
+    d = decide(_p(objection_type=ObjectionType.PRICE, whatsapp_available=True))
+    assert d.tactic == Tactic.ISOLATE
