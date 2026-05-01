@@ -6,6 +6,45 @@
 
 ---
 
+## Phase B-3 (shipped) — Decision layer (tactic library + rules engine)
+
+A pure rules engine that takes a `Perception` (objection type + subtype +
+sentiment + stage + score + history) and returns a `Decision` (tactic +
+one-sentence reasoning + micro-guidance for the Speech layer). No LLM, no
+I/O — fully deterministic, fully testable, A/B-able.
+
+This ships purely additive: new endpoint `POST /decide`, new modules. The
+existing `/generate` flow is untouched. The next phase replaces the
+4000-token monolithic prompt with a small voice-rules prompt + the chosen
+tactic's micro-guidance.
+
+**New files:**
+- [services/tactics.py](fastapi-brain/app/services/tactics.py) — `Tactic` enum (13 tactics) + per-tactic micro-guidance strings
+- [services/decision.py](fastapi-brain/app/services/decision.py) — `Perception` dataclass + `decide()` rules engine
+- [routes/decide.py](fastapi-brain/app/routes/decide.py) — `POST /decide` endpoint
+- [tests/unit/test_decision.py](fastapi-brain/tests/unit/test_decision.py) — 31 rule + priority + payload tests
+
+**Rule priority (first match wins):**
+1. Hard exits (END stage, very low score after multiple turns) → `GRACEFUL_EXIT`
+2. Buying signals (ready_to_buy / asking_logistics / score ≥ 80) → `ASSUMPTIVE_CLOSE` / `TRIAL_CLOSE`
+3. Discovery openers (INTRO turn 0; low score early with no clear objection) → `ASK_OPEN` / `ASK_DISQUALIFY`
+4. Objection-specific paths — see table below
+5. Fallback (no decisive signal) → `ASK_OPEN`
+
+**Objection-specific paths:**
+
+| Objection | First mention | Repeated | Subtype-specific overrides |
+|---|---|---|---|
+| `PRICE` | `ISOLATE` | `REFRAME` then `CONCESSION_REAL` (5%→10% ladder) | `budget` / `found_cheaper` + alternative available → `ALTERNATIVE_PIVOT`; max discount reached → `PERMISSION_PUSH` |
+| `TRUST` | `ASK_OPEN` | `CONCESSION_NON_MONETARY` (warranty / refund / proof) | — |
+| `TIMING` | `TIME_CAPTURE` | `PERMISSION_PUSH` | `wait_for_sale` + no concession yet → `CONCESSION_REAL` |
+| `CONFUSION` | `MIRROR` | same | `how_works` / `comparison_unclear` / `fit_size` → `ASK_OPEN` |
+| `POSITIVE_SIGNAL` | per buying-signal rules | per buying-signal rules | `interested` at neutral score → `ASK_OPEN` to deepen |
+
+**Backwards compatible:** new endpoint, no existing route changed. Decision is exposed but not yet consumed by `/generate` — the next phase wires it into the Speech layer.
+
+---
+
 ## Phase B-2 (shipped) — Sub-typed objections
 
 Surfaces the fine-grained sub-type that the seed file already tags (e.g. PRICE
@@ -117,7 +156,7 @@ Vapi gives metadata text agents don't have:
 |---|---|---|
 | **B-1** ✅ | Pinecone classifier — Perception foundation | shipped |
 | **B-2** ✅ | Sub-typed objections — vote() surfaces consensus subtype, threaded through API | shipped |
-| **B-3** | Decision layer — extract tactics into named library + rules engine | ~3 days |
+| **B-3** ✅ | Decision layer — tactic library + rules engine + /decide endpoint | shipped |
 | **B-4** | Speech layer — strip prompt to voice rules + per-tactic micro-prompts | ~2 days |
 | **B-5** | Voice-channel signals — interruption / latency / length-trend into Perception | ~1 day |
 | **B-6** | Tactic logging — `tactic_used` on every CallTurn for the learning loop | ~0.5 day |

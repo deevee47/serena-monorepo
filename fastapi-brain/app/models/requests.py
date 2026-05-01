@@ -69,3 +69,21 @@ class AlternativesRequest(BaseModel):
     exclude_id: str
     current_price: float | None = None
     top_k: int = 3
+
+
+class DecideRequest(BaseModel):
+    """Inputs the rules engine needs to pick a tactic. Built by node-gateway
+    from live session state + the latest classifier output."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    call_id: str
+    objection_type: ObjectionType | None = None
+    objection_subtype: str | None = None
+    sentiment: str | None = None  # 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL'
+    stage: ConversationStage
+    score: int
+    turn_count: int = 0
+    prior_objection_types: list[ObjectionType] = []
+    discounts_offered: list[int] = []
+    has_alternative_product: bool = False
