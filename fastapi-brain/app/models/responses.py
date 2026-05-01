@@ -27,3 +27,11 @@ class AlternativesResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     alternatives: list[ProductContext]
+
+
+class DecideResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    tactic: str  # one of the values in the Tactic enum (services/tactics.py)
+    reasoning: str  # one-sentence justification for log attribution
+    micro_guidance: str  # 3-5 lines for the speech-layer prompt
