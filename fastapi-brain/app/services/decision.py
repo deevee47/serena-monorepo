@@ -41,6 +41,10 @@ class Perception:
     # missing, signal-driven rules are skipped and the rules engine behaves
     # exactly as it did before signals were added.
     signals: SignalSnapshot = field(default_factory=SignalSnapshot)
+    # When True, the agent has a real mechanism (WhatsApp) to follow through —
+    # so close-side and graceful-exit choices are upgraded to send-link tactics
+    # that actually move money / leave a real trail.
+    whatsapp_available: bool = False
 
 
 # Score thresholds — duplicated as named constants so changes are searchable.
@@ -57,9 +61,21 @@ HIGH_FILLER_DENSITY = 0.15  # fraction of tokens that are fillers
 def decide(p: Perception) -> Decision:
     # 1. Hard exits ---------------------------------------------------------
     if p.stage == ConversationStage.END:
+        # Upgrade graceful exits to a real action when we can — leave a usable
+        # trail (product info on WhatsApp) instead of just a verbal goodbye.
+        if p.whatsapp_available and p.score >= 25:
+            return _decision(
+                Tactic.SEND_PRODUCT_INFO_WHATSAPP,
+                "stage is END but score is recoverable — send product info on WhatsApp instead of pure verbal exit",
+            )
         return _decision(Tactic.GRACEFUL_EXIT, "stage is END — already exiting")
 
     if p.score < SCORE_GRACEFUL_EXIT and p.turn_count >= 3:
+        if p.whatsapp_available and p.score >= 15:
+            return _decision(
+                Tactic.SEND_PRODUCT_INFO_WHATSAPP,
+                f"score {p.score} low but recoverable — send product info on WhatsApp instead of forcing exit",
+            )
         return _decision(
             Tactic.GRACEFUL_EXIT,
             f"score {p.score} below {SCORE_GRACEFUL_EXIT} after {p.turn_count} turns — preserve relationship over forcing close",
@@ -68,6 +84,13 @@ def decide(p: Perception) -> Decision:
     # 2. Buying signals (close-side) ----------------------------------------
     if p.objection_type == ObjectionType.POSITIVE_SIGNAL:
         if p.objection_subtype in {"ready_to_buy", "asking_logistics"} or p.score >= SCORE_ASSUMPTIVE_CLOSE:
+            # If we have a real close mechanism, use it instead of just verbal
+            # closing — actually moves money rather than ending the call ambiguously.
+            if p.whatsapp_available:
+                return _decision(
+                    Tactic.SEND_CHECKOUT_LINK_WHATSAPP,
+                    f"explicit buying signal + WhatsApp available — send checkout link (subtype={p.objection_subtype}, score={p.score})",
+                )
             return _decision(
                 Tactic.ASSUMPTIVE_CLOSE,
                 f"explicit buying signal (subtype={p.objection_subtype}, score={p.score})",
@@ -81,6 +104,11 @@ def decide(p: Perception) -> Decision:
             return _decision(Tactic.ASK_OPEN, "interested but not committed — deepen the interest")
 
     if p.stage == ConversationStage.CLOSE:
+        if p.whatsapp_available:
+            return _decision(
+                Tactic.SEND_CHECKOUT_LINK_WHATSAPP,
+                "stage is CLOSE + WhatsApp available — send checkout link to capture the close",
+            )
         return _decision(Tactic.ASSUMPTIVE_CLOSE, "stage is CLOSE — proceed to logistics")
 
     # 2.5 Voice-channel signal overrides (only when signals are present) ---

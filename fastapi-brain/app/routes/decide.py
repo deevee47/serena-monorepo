@@ -29,6 +29,7 @@ async def decide_endpoint(body: DecideRequest, request: Request) -> DecideRespon
             filler_density=body.filler_density,
             response_latency_ms=body.response_latency_ms,
         ),
+        whatsapp_available=body.whatsapp_available,
     )
     decision = decide(perception)
     log.info(
