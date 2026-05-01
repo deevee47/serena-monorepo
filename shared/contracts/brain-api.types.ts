@@ -41,6 +41,19 @@ export interface ClassifyObjectionResponse {
   objection_type: ObjectionType;
   confidence: number; // 0.0 to 1.0
   sentiment: 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL';
+  // B-2: fine-grained sub-type — populated by the Pinecone classifier path,
+  // null on LLM fallback. Examples per objection_type:
+  //   PRICE: 'too_expensive' | 'found_cheaper' | 'budget' | 'bad_value'
+  //          | 'wants_discount' | 'sticker_shock' | 'high_intent' | ...
+  //   TRUST: 'brand_unknown' | 'quality_doubt' | 'reviews_concern'
+  //          | 'refund_policy' | 'warranty' | 'scam_fear' | ...
+  //   TIMING: 'not_now' | 'spouse_decision' | 'wait_for_sale'
+  //           | 'comparison_shopping' | 'busy' | 'season_wrong' | 'ready_now'
+  //   CONFUSION: 'feature_unclear' | 'how_works' | 'comparison_unclear' | 'fit_size'
+  //   POSITIVE_SIGNAL: 'interested' | 'ready_to_buy' | 'asking_logistics'
+  //                    | 'compliment' | 'agreement'
+  //   NEUTRAL: 'backchannel' | 'acknowledgment'
+  subtype?: string | null;
 }
 
 export interface GenerateResponseRequest {

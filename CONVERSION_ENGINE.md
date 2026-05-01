@@ -6,6 +6,31 @@
 
 ---
 
+## Phase B-2 (shipped) — Sub-typed objections
+
+Surfaces the fine-grained sub-type that the seed file already tags (e.g. PRICE
+→ `too_expensive | found_cheaper | budget | bad_value | wants_discount |
+sticker_shock | high_intent | pleasant_surprise`). This is what lets the
+Decision layer in B-3 select tactic by sub-type instead of just by top-level
+objection.
+
+**Voting rules for subtype:**
+- **Strict win:** use the top-1 match's subtype directly
+- **Consensus win:** use the most-common subtype if ≥2 of top-3 agree, else fall back to top-1's subtype
+- **No subtype on matches:** subtype stays `null`
+- **LLM fallback path:** subtype always `null` (the LLM doesn't predict sub-types in v1)
+
+**Changes:**
+- `Classification` NamedTuple replaces the bare tuple in [classifier.py](fastapi-brain/app/services/classifier.py); 4th field is optional `subtype`
+- `VoteResult` gets a 5th field `subtype` in [objection_index.py](fastapi-brain/app/services/objection_index.py); new `_consensus_subtype()` helper
+- `ClassifyObjectionResponse` gets `subtype: str | None` ([responses.py](fastapi-brain/app/models/responses.py), [shared/contracts](shared/contracts/brain-api.types.ts))
+- `/classify` route threads it through ([routes/classify.py](fastapi-brain/app/routes/classify.py))
+- 4 new unit tests for subtype voting (strict, consensus majority, all-disagree fallback, missing data)
+
+**Backwards compatible:** `subtype` is optional everywhere — existing callers that ignore the field keep working unchanged.
+
+---
+
 ## Phase B-1 (shipped) — Pinecone hybrid objection classifier
 
 Replaces the per-turn LLM classifier with embedding nearest-neighbor search,
@@ -91,7 +116,7 @@ Vapi gives metadata text agents don't have:
 | Phase | Ships | Active dev |
 |---|---|---|
 | **B-1** ✅ | Pinecone classifier — Perception foundation | shipped |
-| **B-2** | Sub-typed objections (PRICE→`too_expensive\|found_cheaper\|budget\|bad_value`) | ~2 days |
+| **B-2** ✅ | Sub-typed objections — vote() surfaces consensus subtype, threaded through API | shipped |
 | **B-3** | Decision layer — extract tactics into named library + rules engine | ~3 days |
 | **B-4** | Speech layer — strip prompt to voice rules + per-tactic micro-prompts | ~2 days |
 | **B-5** | Voice-channel signals — interruption / latency / length-trend into Perception | ~1 day |

@@ -13,18 +13,18 @@ router = APIRouter()
 @limiter.limit("60/minute")
 async def classify(body: ClassifyObjectionRequest, request: Request) -> ClassifyObjectionResponse:
     log = get_logger(body.call_id)
-    objection_type, sentiment, confidence = await classify_objection(
-        body.utterance, body.stage, body.score, body.call_id
-    )
+    result = await classify_objection(body.utterance, body.stage, body.score, body.call_id)
     log.info(
         "classified",
         utterance=body.utterance[:100],
-        objection_type=objection_type,
-        sentiment=sentiment,
-        confidence=confidence,
+        objection_type=result.objection_type,
+        sentiment=result.sentiment,
+        confidence=result.confidence,
+        subtype=result.subtype,
     )
     return ClassifyObjectionResponse(
-        objection_type=objection_type,
-        sentiment=sentiment,
-        confidence=confidence,
+        objection_type=result.objection_type,
+        sentiment=result.sentiment,
+        confidence=result.confidence,
+        subtype=result.subtype,
     )
