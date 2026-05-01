@@ -11,10 +11,16 @@ from app.services.tools import (
 )
 
 
-def test_openai_tools_has_two_tools_with_function_type():
-    assert len(OPENAI_TOOLS) == 2
+def test_openai_tools_exposes_side_effect_and_observation_tools():
     names = {t["function"]["name"] for t in OPENAI_TOOLS}
-    assert names == {"send_whatsapp_checkout_link", "send_whatsapp_product_info"}
+    # Side-effect tools (gateway dispatches)
+    assert "send_whatsapp_checkout_link" in names
+    assert "send_whatsapp_product_info" in names
+    # Observation tools (server-side, result fed back to LLM)
+    assert "check_inventory" in names
+    assert "get_recent_purchases" in names
+    assert "get_review_summary" in names
+    assert "get_delivery_eta" in names
     assert all(t["type"] == "function" for t in OPENAI_TOOLS)
 
 

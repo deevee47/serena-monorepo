@@ -5,7 +5,13 @@ prompt builder (legacy speech-prompt, new converse-prompt) so the wording
 and structure stay aligned in one place.
 """
 
-from app.models.requests import CartContext, ConversationTurn, ProductContext
+from app.models.requests import (
+    CartContext,
+    ConversationTurn,
+    CustomerContext,
+    CustomerSegment,
+    ProductContext,
+)
 
 MAX_DISCOUNT = 10
 HISTORY_TURNS_TO_INCLUDE = 4
@@ -45,11 +51,66 @@ def format_product(label: str, p: ProductContext | None) -> str:
     features = "\n    - " + "\n    - ".join(p.key_features) if p.key_features else ""
     return (
         f"{label}:\n"
+        f"  product_id: {p.product_id}    (use this exact value when calling tools)\n"
         f"  name: {p.name}\n"
         f"  price: ${p.price:.2f}\n"
         f"  description: {p.description}\n"
         f"  features:{features}\n"
     )
+
+
+_SEGMENT_NOTE = {
+    CustomerSegment.FIRST_TIME: (
+        "first-time customer (no prior orders) — focus on trust, fit, "
+        "and removing the risk of a first purchase"
+    ),
+    CustomerSegment.RETURNING: (
+        "returning customer (has bought before) — assume basic trust, "
+        "reference past purchases naturally where relevant"
+    ),
+    CustomerSegment.VIP: (
+        "VIP customer (high lifetime value, multiple prior orders) — "
+        "treat them like a regular; speed > pitch; offer the best discount "
+        "tier earlier than usual to honor the relationship"
+    ),
+    CustomerSegment.LAPSED: (
+        "lapsed customer (last order > 6 months ago) — re-warm them; "
+        "acknowledge the gap if natural; don't assume current preferences"
+    ),
+}
+
+
+def format_customer(c: CustomerContext | None) -> str:
+    """Render the customer profile as a tight context block."""
+    if c is None:
+        return ""
+
+    lines = ["CUSTOMER PROFILE:"]
+    name = c.name or "(unknown name)"
+    lines.append(f"  name: {name}")
+    if c.email:
+        lines.append(f"  email: {c.email}")
+    lines.append(f"  phone: {c.phone}")
+    lines.append(f"  segment: {c.segment.value} — {_SEGMENT_NOTE.get(c.segment, '')}")
+    if c.lifetime_value > 0:
+        lines.append(f"  lifetime value: ${c.lifetime_value:.2f}")
+    if c.timezone:
+        lines.append(f"  timezone: {c.timezone}")
+    if c.preferred_contact:
+        lines.append(f"  preferred contact: {c.preferred_contact}")
+    if c.prior_calls_count > 0:
+        lines.append(f"  prior call attempts: {c.prior_calls_count}")
+    if c.past_orders:
+        lines.append("  recent past orders (most recent first):")
+        for o in c.past_orders[:5]:
+            lines.append(
+                f"    - {o.product_name} (${o.price:.2f}) ~{o.days_ago} days ago"
+            )
+    lines.append(
+        "Address them by first name when natural; reference past orders only "
+        "when it strengthens the moment, not as a recital."
+    )
+    return "\n".join(lines)
 
 
 def format_cart(c: CartContext | None) -> str:

@@ -33,9 +33,109 @@ enum Sentiment {
   NEUTRAL
 }
 
+enum CustomerSegment {
+  FIRST_TIME // never bought before
+  RETURNING  // 1-3 prior orders
+  VIP        // 4+ prior orders OR LTV > $1000
+  LAPSED     // last order > 6 months ago
+}
+
+enum CartStatus {
+  ACTIVE      // user is shopping right now
+  ABANDONED   // user left without checking out
+  CONVERTED   // user completed checkout (possibly via this agent)
+  DELETED     // user explicitly emptied
+}
+
+model Customer {
+  id                  String          @id @default(uuid())
+  phone               String          @unique // E.164
+  name                String?
+  email               String?
+  lifetimeValue       Decimal         @default(0) @db.Decimal(10, 2) @map("lifetime_value")
+  segment             CustomerSegment @default(FIRST_TIME)
+  priorCallsCount     Int             @default(0) @map("prior_calls_count")
+  timezone            String?         // e.g. "America/Los_Angeles"
+  preferredContact    String?         @map("preferred_contact") // 'whatsapp' | 'email' | 'phone'
+  createdAt           DateTime        @default(now()) @map("created_at")
+  updatedAt           DateTime        @updatedAt @map("updated_at")
+
+  carts     Cart[]
+  purchases Purchase[]
+  calls     Call[]
+
+  @@index([phone])
+  @@index([segment])
+  @@map("customers")
+}
+
+model Cart {
+  id          String     @id @default(uuid())
+  customerId  String     @map("customer_id")
+  status      CartStatus @default(ACTIVE)
+  abandonedAt DateTime?  @map("abandoned_at")
+  createdAt   DateTime   @default(now()) @map("created_at")
+  updatedAt   DateTime   @updatedAt @map("updated_at")
+
+  customer Customer   @relation(fields: [customerId], references: [id])
+  items    CartItem[]
+
+  @@index([customerId])
+  @@index([status, abandonedAt])
+  @@map("carts")
+}
+
+model CartItem {
+  id            String   @id @default(uuid())
+  cartId        String   @map("cart_id")
+  productId     String   @map("product_id")
+  priceAtAdd    Decimal  @db.Decimal(10, 2) @map("price_at_add")
+  quantity      Int      @default(1)
+  addedAt       DateTime @default(now()) @map("added_at")
+
+  cart    Cart    @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id])
+
+  @@index([cartId])
+  @@map("cart_items")
+}
+
+model Purchase {
+  id          String   @id @default(uuid())
+  customerId  String   @map("customer_id")
+  productId   String   @map("product_id")
+  price       Decimal  @db.Decimal(10, 2)
+  quantity    Int      @default(1)
+  purchasedAt DateTime @default(now()) @map("purchased_at")
+
+  customer Customer @relation(fields: [customerId], references: [id])
+  product  Product  @relation(fields: [productId], references: [id])
+
+  @@index([customerId])
+  @@index([productId])
+  @@index([purchasedAt])
+  @@map("purchases")
+}
+
+model ProductReview {
+  id        String   @id @default(uuid())
+  productId String   @map("product_id")
+  rating    Int      // 1-5
+  body      String
+  helpful   Int      @default(0) // upvotes / "helpful" count
+  createdAt DateTime @default(now()) @map("created_at")
+
+  product Product @relation(fields: [productId], references: [id])
+
+  @@index([productId])
+  @@index([productId, rating])
+  @@map("product_reviews")
+}
+
 model Call {
   id              String      @id @default(uuid())
   callId          String      @unique @map("call_id")
+  customerId      String?     @map("customer_id") // nullable for unknown callers
   phoneNumber     String?     @map("phone_number")
   createdAt       DateTime    @default(now()) @map("created_at")
   endedAt         DateTime?   @map("ended_at")
@@ -45,8 +145,11 @@ model Call {
   discountGiven   Int         @default(0) @map("discount_given")
   stageReached    String?     @map("stage_reached")
   productId       String?     @map("product_id")
-  turns           CallTurn[]
 
+  customer Customer?  @relation(fields: [customerId], references: [id])
+  turns    CallTurn[]
+
+  @@index([customerId])
   @@map("calls")
 }
 
@@ -57,7 +160,7 @@ model CallTurn {
   speaker          Speaker
   utterance        String
   objectionType    String?    @map("objection_type")
-  objectionSubtype String?    @map("objection_subtype") // e.g. PRICE -> 'too_expensive', 'found_cheaper'
+  objectionSubtype String?    @map("objection_subtype")
   sentiment        Sentiment?
   scoreBefore      Int        @map("score_before")
   scoreAfter       Int        @map("score_after")
@@ -77,17 +180,26 @@ model CallTurn {
 }
 
 model Product {
-  id              String   @id
+  id              String    @id
   name            String
   description     String?
-  price           Decimal  @db.Decimal(10, 2)
+  price           Decimal   @db.Decimal(10, 2)
   category        String?
   tags            String[]
-  isActive        Boolean  @default(true) @map("is_active")
-  embeddingSynced Boolean  @default(false) @map("embedding_synced")
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @updatedAt @map("updated_at")
-  metadata        Json?    @map("metadata")
+  isActive        Boolean   @default(true) @map("is_active")
+  embeddingSynced Boolean   @default(false) @map("embedding_synced")
+  // Inventory snapshot, used by the check_inventory observation tool.
+  // Null = unknown / unmanaged. Restock ETA is null when in stock.
+  inventoryCount  Int?      @map("inventory_count")
+  restockEta      DateTime? @map("restock_eta")
+  stockUpdatedAt  DateTime? @map("stock_updated_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  metadata        Json?     @map("metadata")
+
+  cartItems CartItem[]
+  purchases Purchase[]
+  reviews   ProductReview[]
 
   @@index([category])
   @@index([isActive])

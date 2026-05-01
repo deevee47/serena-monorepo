@@ -14,11 +14,12 @@ Composition (per call):
   6. Customer cart, product facts, alternative product, prior discounts
 """
 
-from app.models.requests import CartContext, ProductContext
+from app.models.requests import CartContext, CustomerContext, ProductContext
 from app.services.prompt_sections import (
     HARD_CONSTRAINTS,
     VOICE_RULES,
     format_cart,
+    format_customer,
     format_product,
 )
 
@@ -64,20 +65,39 @@ PRINCIPLES — operate by these, no scripts:
 
 
 _TOOL_GUIDANCE = """\
-TOOLS — use them when you actually want their effect, never as a substitute
-for talk. ALWAYS speak one short confirmation sentence first, then call the tool.
+TOOLS — two categories. Use them when they help; do NOT call a tool just
+because it's available.
 
+OBSERVATION tools (read real data; result comes back to you, then you
+respond using the facts):
+  - check_inventory(product_id):
+      Use when you want to mention HONEST scarcity or when the customer
+      asks 'how many are left'. Do NOT mention specific stock numbers
+      unless this tool returned them.
+  - get_recent_purchases(product_id, days):
+      Use for HONEST social proof when the count is high enough to actually
+      persuade. Do not invent or round numbers.
+  - get_review_summary(product_id):
+      Use when the customer doubts quality, asks 'is it any good', or
+      raises trust concerns. Quote reviewers verbatim from the result.
+  - get_delivery_eta(zip_code, product_id):
+      Use when shipping speed is a closing lever or when they ask.
+
+  When you call an observation tool, do NOT speak first — just call. The
+  next turn you'll have the real data and can speak with grounded facts.
+
+SIDE-EFFECT tools (these END your turn — speak ONE short confirmation
+sentence first, then call):
   - send_whatsapp_checkout_link(discount_percent: 0-10):
       Call when the customer is ready to buy: explicit yes, agreeing to a
-      discount, asking logistics like shipping/payment. discount_percent=0
-      unless you've negotiated through the ladder. NEVER call this on a turn
-      where the customer raised a fresh objection — handle the objection first.
-
+      discount, asking logistics. discount_percent=0 unless you've
+      negotiated through the ladder. NEVER call this on a turn where the
+      customer raised a fresh objection — handle the objection first.
   - send_whatsapp_product_info():
       Call on a graceful exit when their interest is recoverable — leaves
       product details on WhatsApp instead of just a verbal goodbye.
 
-  - When neither tool fits this turn, just speak. Most turns are speech-only.\
+When no tool fits, just speak. Most turns are speech-only.\
 """
 
 
@@ -86,11 +106,16 @@ def build_converse_system_prompt(
     product_context: ProductContext | None = None,
     alternative_product_context: ProductContext | None = None,
     cart_context: CartContext | None = None,
+    customer_context: CustomerContext | None = None,
     discounts_already_offered: list[int] | None = None,
 ) -> str:
-    """Compose the system prompt. Cart/product/discounts are baked in per call
-    so the LLM has the live snapshot."""
+    """Compose the system prompt. Customer/cart/product/discounts are baked
+    in per call so the LLM has the live snapshot."""
     sections: list[str] = [_OBJECTIVE, VOICE_RULES, _PRINCIPLES, _TOOL_GUIDANCE]
+
+    customer_section = format_customer(customer_context)
+    if customer_section:
+        sections.append(customer_section)
 
     cart_section = format_cart(cart_context)
     if cart_section:

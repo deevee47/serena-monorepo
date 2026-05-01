@@ -26,3 +26,5 @@ out
 
 BUILD_GUIDE.md
 CLAUDE.md
+# Per-run eval output
+eval-results/

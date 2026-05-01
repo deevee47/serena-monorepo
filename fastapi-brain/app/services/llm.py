@@ -1,6 +1,6 @@
 import json
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Any, TypedDict
 
 from openai import (
@@ -15,12 +15,6 @@ from openai import (
 from app.config.settings import settings
 from app.utils.errors import LLMError
 from app.utils.logger import get_logger
-
-_OPENAI_PARAMS: dict = {
-    "max_tokens": 150,
-    "temperature": 0.7,
-    "stream": True,
-}
 
 
 def _build_messages(system_prompt: str, messages: list[dict]) -> list[dict]:
@@ -42,65 +36,19 @@ def _raise_llm_error(log, exc: Exception) -> None:
     raise exc
 
 
-async def generate_response(system_prompt: str, messages: list[dict], call_id: str) -> str:
-    log = get_logger(call_id)
-    client = AsyncOpenAI(api_key=settings.llm_api_key)
-    start = time.perf_counter()
-
-    try:
-        stream = await client.chat.completions.create(
-            model=settings.openai_model,
-            messages=_build_messages(system_prompt, messages),
-            **_OPENAI_PARAMS,
-        )
-        chunks: list[str] = []
-        async for chunk in stream:
-            delta = chunk.choices[0].delta.content if chunk.choices else None
-            if delta:
-                chunks.append(delta)
-
-        text = "".join(chunks).strip()
-        duration_ms = round((time.perf_counter() - start) * 1000, 2)
-        log.info("llm_response", duration_ms=duration_ms)
-        log.debug("llm_text", text=text)
-        return text
-
-    except Exception as exc:
-        _raise_llm_error(log, exc)
-
-
-async def stream_response(
-    system_prompt: str,
-    messages: list[dict],
-    call_id: str,
-) -> AsyncGenerator[str, None]:
-    log = get_logger(call_id)
-    client = AsyncOpenAI(api_key=settings.llm_api_key)
-    start = time.perf_counter()
-    try:
-        stream = await client.chat.completions.create(
-            model=settings.openai_model,
-            messages=_build_messages(system_prompt, messages),
-            **_OPENAI_PARAMS,
-        )
-        chunk_count = 0
-        async for chunk in stream:
-            delta = chunk.choices[0].delta.content if chunk.choices else None
-            if delta:
-                chunk_count += 1
-                yield delta
-        duration_ms = round((time.perf_counter() - start) * 1000, 2)
-        log.info("llm_stream_response", duration_ms=duration_ms, chunks=chunk_count)
-    except Exception as exc:
-        _raise_llm_error(log, exc)
-
-
 # ─── Function-calling (converse) ───────────────────────────────────────────
-# These functions exercise the OpenAI tools/function-calling API. The streaming
-# variant interleaves text deltas with one fully-parsed tool_call event at the
-# end (when finish_reason=='tool_calls'). OpenAI streams tool args as JSON
-# fragments per chunk; we accumulate them and emit a single event so callers
-# don't have to re-parse partial JSON.
+# Single-call-per-turn function-calling pipeline. Two tool categories:
+#
+#   - Side-effect tools: gateway dispatches the side effect (e.g. WhatsApp
+#     send). The LLM emits one tool_call, which we yield to the caller, and
+#     the turn ends. The model isn't given the result back.
+#
+#   - Observation tools: executed server-side via `run_observation_tool`. The
+#     result is appended back into the message list as a tool message, and
+#     we re-stream from OpenAI. The LLM continues with grounded facts. This
+#     loop runs until the model emits text-only or a side-effect tool.
+#
+# We cap the observation loop at MAX_TOOL_TURNS to prevent runaways.
 
 _CONVERSE_PARAMS: dict = {
     # Slightly more room than the legacy 150-token cap because the model now
@@ -109,6 +57,20 @@ _CONVERSE_PARAMS: dict = {
     "temperature": 0.7,
     "stream": True,
     "tool_choice": "auto",
+}
+
+MAX_TOOL_TURNS = 4  # safety cap on observation-loop iterations per user turn
+
+# Tool names that should be executed server-side and looped back to the LLM.
+# Kept here (not imported from app.services.tools) to keep llm.py importable
+# without dragging the entire tools module if it ever needs to be tested
+# independently — the side-effect/observation contract is duplicated for
+# clarity.
+_OBSERVATION_TOOL_NAMES: set[str] = {
+    "check_inventory",
+    "get_recent_purchases",
+    "get_review_summary",
+    "get_delivery_eta",
 }
 
 
@@ -123,12 +85,48 @@ class ConverseToolCallEvent(TypedDict):
     args: dict[str, Any]
 
 
+class ConverseObservationEvent(TypedDict):
+    """Emitted when an observation tool runs server-side. Useful for the CLI
+    and gateway logs; the LLM doesn't see this directly (it sees the tool
+    result message we feed back)."""
+    type: str  # 'observation'
+    name: str
+    args: dict[str, Any]
+    result: dict[str, Any]
+
+
 class ConverseDoneEvent(TypedDict):
     type: str  # 'done'
     finish_reason: str | None
 
 
-ConverseEvent = ConverseTextEvent | ConverseToolCallEvent | ConverseDoneEvent
+ConverseEvent = (
+    ConverseTextEvent
+    | ConverseToolCallEvent
+    | ConverseObservationEvent
+    | ConverseDoneEvent
+)
+
+
+# Type alias for the observation-tool callback.
+ObservationToolRunner = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
+
+
+async def _stream_one_pass(
+    client: AsyncOpenAI,
+    full_messages: list[dict],
+    tools: list[dict],
+    log,
+) -> tuple[str, list[dict], str | None]:
+    """Run one OpenAI chat completion stream pass. Yields nothing — collects
+    text deltas internally — but the caller wraps this with another generator
+    that yields events. Returns (text, tool_calls_list, finish_reason).
+
+    tool_calls_list shape (mirrors OpenAI assistant message tool_calls field):
+        [{"id": "call_xxx", "type": "function",
+          "function": {"name": "...", "arguments": "json string"}}, ...]
+    """
+    raise NotImplementedError("inlined into converse_response_stream below")
 
 
 async def converse_response_stream(
@@ -136,76 +134,183 @@ async def converse_response_stream(
     messages: list[dict],
     tools: list[dict],
     call_id: str,
+    *,
+    run_observation_tool: ObservationToolRunner | None = None,
 ) -> AsyncGenerator[ConverseEvent, None]:
-    """Yield typed events: text deltas as they arrive, then optionally one
-    tool_call event after the model finalizes args, then a done event."""
+    """Yield typed events: text deltas as they arrive, optionally one or more
+    `observation` events when observation tools execute, then optionally one
+    `tool_call` event for a side-effect tool, then a `done` event.
+
+    Observation tools loop server-side: the brain calls them, feeds results
+    back to the model, and re-streams. The caller only sees the final-pass
+    text + any side-effect tool_call.
+    """
     log = get_logger(call_id)
     client = AsyncOpenAI(api_key=settings.llm_api_key)
     start = time.perf_counter()
 
-    text_chunks = 0
-    # Tool args stream as JSON fragments under tool_calls[i].function.arguments.
-    # Track per-index since OpenAI may emit multiple tool calls in one turn,
-    # though for our v1 prompt it should always be at most one.
-    tool_buffers: dict[int, dict[str, Any]] = {}
-    finish_reason: str | None = None
+    # Mutable working copy — observation loop appends assistant + tool messages.
+    working_messages: list[dict] = list(messages)
+
+    total_text_chunks = 0
+    total_observations = 0
+    final_finish_reason: str | None = None
 
     try:
-        stream = await client.chat.completions.create(
-            model=settings.openai_model,
-            messages=_build_messages(system_prompt, messages),
-            tools=tools,
-            **_CONVERSE_PARAMS,
-        )
+        for tool_turn in range(MAX_TOOL_TURNS + 1):
+            stream = await client.chat.completions.create(
+                model=settings.openai_model,
+                messages=_build_messages(system_prompt, working_messages),
+                tools=tools,
+                **_CONVERSE_PARAMS,
+            )
 
-        async for chunk in stream:
-            if not chunk.choices:
+            # Per-pass accumulators
+            tool_buffers: dict[int, dict[str, Any]] = {}
+            this_pass_finish: str | None = None
+            this_pass_text_parts: list[str] = []
+
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
+                choice = chunk.choices[0]
+                delta = choice.delta
+
+                if delta.content:
+                    total_text_chunks += 1
+                    this_pass_text_parts.append(delta.content)
+                    yield {"type": "text", "delta": delta.content}
+
+                if delta.tool_calls:
+                    for tc in delta.tool_calls:
+                        idx = tc.index if tc.index is not None else 0
+                        buf = tool_buffers.setdefault(
+                            idx,
+                            {"id": "", "name": "", "args_json": ""},
+                        )
+                        if tc.id:
+                            buf["id"] = tc.id
+                        if tc.function and tc.function.name:
+                            buf["name"] = tc.function.name
+                        if tc.function and tc.function.arguments:
+                            buf["args_json"] += tc.function.arguments
+
+                if choice.finish_reason:
+                    this_pass_finish = choice.finish_reason
+
+            # Parse all tool calls from this pass.
+            parsed_calls: list[dict[str, Any]] = []
+            for buf in tool_buffers.values():
+                if not buf["name"]:
+                    continue
+                try:
+                    args_obj = json.loads(buf["args_json"]) if buf["args_json"] else {}
+                except json.JSONDecodeError:
+                    log.warning(
+                        "tool_call_args_invalid_json",
+                        tool=buf["name"],
+                        raw=buf["args_json"][:200],
+                    )
+                    args_obj = {}
+                parsed_calls.append({
+                    "id": buf["id"] or f"call_{tool_turn}_{len(parsed_calls)}",
+                    "name": buf["name"],
+                    "args": args_obj,
+                    "args_json": buf["args_json"] or "{}",
+                })
+
+            # Decide what to do next.
+            observation_calls = [
+                c for c in parsed_calls if c["name"] in _OBSERVATION_TOOL_NAMES
+            ]
+            side_effect_calls = [
+                c for c in parsed_calls if c["name"] not in _OBSERVATION_TOOL_NAMES
+            ]
+
+            # If the model called observation tools AND we have a runner,
+            # execute them and loop.
+            if observation_calls and run_observation_tool is not None and tool_turn < MAX_TOOL_TURNS:
+                # 1) Append the assistant message with all tool_calls (must
+                #    include side-effect calls too if present, per OpenAI's
+                #    schema, but for our prompts we don't expect mixed turns).
+                assistant_text = "".join(this_pass_text_parts)
+                working_messages.append({
+                    "role": "assistant",
+                    "content": assistant_text or None,
+                    "tool_calls": [
+                        {
+                            "id": c["id"],
+                            "type": "function",
+                            "function": {
+                                "name": c["name"],
+                                "arguments": c["args_json"],
+                            },
+                        }
+                        for c in parsed_calls
+                    ],
+                })
+
+                # 2) Execute observation tools and append tool result messages.
+                for c in observation_calls:
+                    try:
+                        result = await run_observation_tool(c["name"], c["args"])
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning(
+                            "observation_tool_error",
+                            tool=c["name"],
+                            error=str(exc),
+                        )
+                        result = {"error": "tool_execution_failed", "message": str(exc)}
+                    total_observations += 1
+                    yield {
+                        "type": "observation",
+                        "name": c["name"],
+                        "args": c["args"],
+                        "result": result,
+                    }
+                    working_messages.append({
+                        "role": "tool",
+                        "tool_call_id": c["id"],
+                        "content": json.dumps(result),
+                    })
+
+                # 3) For any side-effect calls in the same turn, also append a
+                #    placeholder tool result so OpenAI doesn't reject the next
+                #    request. We then yield those so the gateway can dispatch.
+                for c in side_effect_calls:
+                    working_messages.append({
+                        "role": "tool",
+                        "tool_call_id": c["id"],
+                        "content": json.dumps({"dispatched": True}),
+                    })
+                    yield {"type": "tool_call", "name": c["name"], "args": c["args"]}
+
+                # Loop back for another pass.
                 continue
-            choice = chunk.choices[0]
-            delta = choice.delta
 
-            # Text content
-            if delta.content:
-                text_chunks += 1
-                yield {"type": "text", "delta": delta.content}
+            # No observation calls (or no runner / hit cap) — finish.
+            for c in side_effect_calls:
+                yield {"type": "tool_call", "name": c["name"], "args": c["args"]}
 
-            # Tool call deltas (function name + accumulating args fragments)
-            if delta.tool_calls:
-                for tc in delta.tool_calls:
-                    idx = tc.index if tc.index is not None else 0
-                    buf = tool_buffers.setdefault(idx, {"name": "", "args_json": ""})
-                    if tc.function and tc.function.name:
-                        buf["name"] = tc.function.name
-                    if tc.function and tc.function.arguments:
-                        buf["args_json"] += tc.function.arguments
+            # If we hit the cap with leftover observation calls and no runner,
+            # they get yielded as tool_calls so the caller at least sees them.
+            if run_observation_tool is None:
+                for c in observation_calls:
+                    yield {"type": "tool_call", "name": c["name"], "args": c["args"]}
 
-            if choice.finish_reason:
-                finish_reason = choice.finish_reason
-
-        # Emit one tool_call event per accumulated tool call (typically one)
-        for buf in tool_buffers.values():
-            if not buf["name"]:
-                continue
-            try:
-                args_obj = json.loads(buf["args_json"]) if buf["args_json"] else {}
-            except json.JSONDecodeError:
-                log.warning(
-                    "tool_call_args_invalid_json",
-                    tool=buf["name"],
-                    raw=buf["args_json"][:200],
-                )
-                args_obj = {}
-            yield {"type": "tool_call", "name": buf["name"], "args": args_obj}
+            final_finish_reason = this_pass_finish
+            break
 
         duration_ms = round((time.perf_counter() - start) * 1000, 2)
         log.info(
             "converse_stream_response",
             duration_ms=duration_ms,
-            text_chunks=text_chunks,
-            tool_calls=len(tool_buffers),
-            finish_reason=finish_reason,
+            text_chunks=total_text_chunks,
+            observations=total_observations,
+            tool_turns=tool_turn + 1,
+            finish_reason=final_finish_reason,
         )
-        yield {"type": "done", "finish_reason": finish_reason}
+        yield {"type": "done", "finish_reason": final_finish_reason}
 
     except Exception as exc:
         _raise_llm_error(log, exc)
@@ -216,24 +321,40 @@ async def converse_response(
     messages: list[dict],
     tools: list[dict],
     call_id: str,
+    *,
+    run_observation_tool: ObservationToolRunner | None = None,
 ) -> dict[str, Any]:
     """Non-streaming convenience wrapper. Returns
-    {text: str, tool_call: {name, args} | None, finish_reason: str | None}."""
+    {text, tool_call, observations: [{name,args,result}], finish_reason}."""
     text_parts: list[str] = []
     tool_call: dict[str, Any] | None = None
+    observations: list[dict[str, Any]] = []
     finish_reason: str | None = None
 
-    async for event in converse_response_stream(system_prompt, messages, tools, call_id):
+    async for event in converse_response_stream(
+        system_prompt,
+        messages,
+        tools,
+        call_id,
+        run_observation_tool=run_observation_tool,
+    ):
         kind = event["type"]
         if kind == "text":
             text_parts.append(event["delta"])  # type: ignore[typeddict-item]
         elif kind == "tool_call":
             tool_call = {"name": event["name"], "args": event["args"]}  # type: ignore[typeddict-item]
+        elif kind == "observation":
+            observations.append({
+                "name": event["name"],  # type: ignore[typeddict-item]
+                "args": event["args"],  # type: ignore[typeddict-item]
+                "result": event["result"],  # type: ignore[typeddict-item]
+            })
         elif kind == "done":
             finish_reason = event.get("finish_reason")  # type: ignore[typeddict-item]
 
     return {
         "text": "".join(text_parts).strip(),
         "tool_call": tool_call,
+        "observations": observations,
         "finish_reason": finish_reason,
     }
