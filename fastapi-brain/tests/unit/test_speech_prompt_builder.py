@@ -196,14 +196,29 @@ def test_discount_authority_appears_when_available():
     assert "5%" in prompt
 
 
-def test_no_discount_authority_section_when_zero():
+def test_no_discount_authority_section_explicitly_says_none_this_turn():
+    # Without an explicit "NO discount" instruction, models hallucinate one
+    # to "save the sale" on price-pushback turns. Make the prohibition loud.
     prompt = build_speech_system_prompt(
         tactic="ISOLATE",
         micro_guidance="any",
         product_context=_product(),
         discount_available=0,
     )
-    assert "DISCOUNT AUTHORITY" not in prompt
+    assert "DISCOUNT AUTHORITY: NONE" in prompt
+    assert "Do NOT mention any discount" in prompt
+
+
+def test_hard_constraints_block_discount_unless_authorized():
+    prompt = build_speech_system_prompt(
+        tactic="ISOLATE",
+        micro_guidance="any",
+        product_context=_product(),
+    )
+    # The constraint should reference DISCOUNT AUTHORITY explicitly, not just
+    # the cap — otherwise the model can rationalize offering a small discount.
+    assert "DISCOUNT AUTHORITY" in prompt
+    assert "Never mention any discount" in prompt
 
 
 # ─── Messages: history + latest utterance ────────────────────────────────────

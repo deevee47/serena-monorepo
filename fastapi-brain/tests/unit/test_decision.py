@@ -226,12 +226,14 @@ def test_end_stage_overrides_buying_signal():
 
 
 def test_low_score_exit_overrides_objection_handling():
-    # Low score + many turns + a PRICE objection → exit, don't try another concession.
+    # Low score + many turns + PRICE — but only exits once the discount ladder
+    # is exhausted (Fix 1). With unspent ladder, would defer to CONCESSION.
     d = decide(_p(
         score=10,
         turn_count=8,
         objection_type=ObjectionType.PRICE,
         prior_objection_types=[ObjectionType.PRICE] * 3,
+        discounts_offered=[5, 10],  # ladder spent
     ))
     assert d.tactic == Tactic.GRACEFUL_EXIT
 
@@ -283,12 +285,14 @@ def test_mild_negative_trend_does_not_trigger_engagement_collapse():
 
 
 def test_engagement_collapse_yields_to_hard_exit():
-    # GRACEFUL_EXIT (priority 1) wins over engagement collapse rule
+    # GRACEFUL_EXIT (priority 1) wins over engagement collapse rule.
+    # Need discounts exhausted so the Fix-1 defer doesn't kick in.
     d = decide(_p(
         score=10,
         turn_count=8,
         objection_type=ObjectionType.PRICE,
         prior_objection_types=[ObjectionType.PRICE] * 3,
+        discounts_offered=[5, 10],
         signals=SignalSnapshot(utterance_length_trend=-3.0),
     ))
     assert d.tactic == Tactic.GRACEFUL_EXIT
@@ -377,22 +381,26 @@ def test_high_score_assumptive_close_with_whatsapp_picks_send_checkout():
 
 def test_graceful_exit_with_whatsapp_and_recoverable_score_picks_send_info():
     # Low score but not zero → leave a usable trail instead of pure verbal exit.
+    # Discounts exhausted so the Fix-1 defer doesn't kick in.
     d = decide(_p(
         score=18,
         turn_count=8,
         objection_type=ObjectionType.PRICE,
         prior_objection_types=[ObjectionType.PRICE] * 3,
+        discounts_offered=[5, 10],
         whatsapp_available=True,
     ))
     assert d.tactic == Tactic.SEND_PRODUCT_INFO_WHATSAPP
 
 
 def test_graceful_exit_with_whatsapp_but_very_low_score_still_exits():
+    # Discounts exhausted so the Fix-1 defer doesn't kick in.
     d = decide(_p(
         score=10,
         turn_count=8,
         objection_type=ObjectionType.PRICE,
         prior_objection_types=[ObjectionType.PRICE] * 3,
+        discounts_offered=[5, 10],
         whatsapp_available=True,
     ))
     assert d.tactic == Tactic.GRACEFUL_EXIT
@@ -413,3 +421,127 @@ def test_whatsapp_does_not_affect_objection_handling():
     # ordinary objection-handling tactics like ISOLATE.
     d = decide(_p(objection_type=ObjectionType.PRICE, whatsapp_available=True))
     assert d.tactic == Tactic.ISOLATE
+
+
+# ─── Fix 1: defer GRACEFUL_EXIT when discount headroom remains ─────────────
+
+def test_low_score_with_active_price_and_unspent_discounts_does_not_exit():
+    # The bug from the user's CLI run: score crashed to 11 on PRICE pushback,
+    # GRACEFUL_EXIT fired even though the 5%/10% discount ladder was untouched.
+    d = decide(_p(
+        score=11,
+        turn_count=4,
+        objection_type=ObjectionType.PRICE,
+        prior_objection_types=[ObjectionType.PRICE, ObjectionType.PRICE],
+        discounts_offered=[],  # ladder intact
+    ))
+    assert d.tactic == Tactic.CONCESSION_REAL
+
+
+def test_low_score_after_partial_discount_still_offers_remaining_tier():
+    # 5% already given but they're still pushing — give the 10% before exiting.
+    d = decide(_p(
+        score=11,
+        turn_count=5,
+        objection_type=ObjectionType.PRICE,
+        prior_objection_types=[ObjectionType.PRICE, ObjectionType.PRICE, ObjectionType.PRICE],
+        discounts_offered=[5],
+    ))
+    assert d.tactic == Tactic.CONCESSION_REAL
+
+
+def test_low_score_after_full_discount_ladder_exits():
+    # Both 5% and 10% offered — now exit is correct.
+    d = decide(_p(
+        score=11,
+        turn_count=6,
+        objection_type=ObjectionType.PRICE,
+        prior_objection_types=[ObjectionType.PRICE] * 4,
+        discounts_offered=[5, 10],
+    ))
+    assert d.tactic == Tactic.GRACEFUL_EXIT
+
+
+def test_low_score_on_non_price_objection_still_exits():
+    # The defer rule only applies when the *current* objection is PRICE
+    # (i.e. they're still actively negotiating). If they've moved on, exit.
+    d = decide(_p(
+        score=10,
+        turn_count=5,
+        objection_type=ObjectionType.TIMING,
+        prior_objection_types=[ObjectionType.PRICE, ObjectionType.PRICE],
+        discounts_offered=[],
+    ))
+    assert d.tactic == Tactic.GRACEFUL_EXIT
+
+
+def test_end_stage_with_active_price_and_discounts_remaining_recovers():
+    # Even if FSM thinks we're in END, an active PRICE + headroom should
+    # keep negotiating, not just exit.
+    d = decide(_p(
+        stage=ConversationStage.END,
+        score=15,
+        turn_count=5,
+        objection_type=ObjectionType.PRICE,
+        prior_objection_types=[ObjectionType.PRICE, ObjectionType.PRICE],
+        discounts_offered=[],
+    ))
+    assert d.tactic == Tactic.CONCESSION_REAL
+
+
+# ─── Fix 2: POSITIVE_SIGNAL after PRICE = isolation confirmed ──────────────
+
+def test_yes_after_first_price_escalates_to_reframe():
+    # Customer said "too expensive" → we ISOLATEd → they said "yes" (it's the
+    # only blocker). Should reframe value, not reset to ASK_OPEN.
+    d = decide(_p(
+        objection_type=ObjectionType.POSITIVE_SIGNAL,
+        objection_subtype=None,
+        prior_objection_types=[ObjectionType.PRICE],
+        score=47,
+    ))
+    assert d.tactic == Tactic.REFRAME
+
+
+def test_yes_after_two_price_mentions_offers_concession():
+    d = decide(_p(
+        objection_type=ObjectionType.POSITIVE_SIGNAL,
+        objection_subtype=None,
+        prior_objection_types=[ObjectionType.PRICE, ObjectionType.PRICE],
+        score=30,
+        discounts_offered=[],
+    ))
+    assert d.tactic == Tactic.CONCESSION_REAL
+
+
+def test_yes_after_max_discount_returns_permission_push():
+    d = decide(_p(
+        objection_type=ObjectionType.POSITIVE_SIGNAL,
+        objection_subtype=None,
+        prior_objection_types=[ObjectionType.PRICE, ObjectionType.PRICE],
+        discounts_offered=[5, 10],
+    ))
+    assert d.tactic == Tactic.PERMISSION_PUSH
+
+
+def test_positive_signal_with_explicit_subtype_takes_subtype_path():
+    # Confirmation rule only fires when subtype is None — explicit subtypes
+    # like ready_to_buy still go to the close-side branch.
+    d = decide(_p(
+        objection_type=ObjectionType.POSITIVE_SIGNAL,
+        objection_subtype="ready_to_buy",
+        prior_objection_types=[ObjectionType.PRICE],
+    ))
+    assert d.tactic == Tactic.ASSUMPTIVE_CLOSE
+
+
+def test_positive_signal_after_non_price_objection_does_not_escalate_price():
+    # "yes" after a TRUST objection is not the same situation — should fall
+    # through to the standard buying-signal handling (ASK_OPEN at neutral score).
+    d = decide(_p(
+        objection_type=ObjectionType.POSITIVE_SIGNAL,
+        objection_subtype=None,
+        prior_objection_types=[ObjectionType.TRUST],
+        score=50,
+    ))
+    assert d.tactic == Tactic.ASK_OPEN

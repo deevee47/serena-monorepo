@@ -175,13 +175,6 @@ async def turn(session: Session, utterance: str) -> None:
     new_score = update_score(session, classification.objection_type, classification.sentiment)
     next_stage = advance_stage(session, classification.objection_type, classification.sentiment)
 
-    discount_available = 0
-    if next_stage in (ConversationStage.OBJECTION, ConversationStage.NEGOTIATION):
-        if classification.objection_type == "PRICE":
-            ladder = [5, 10]
-            if len(session.discounts_offered) < len(ladder):
-                discount_available = ladder[len(session.discounts_offered)]
-
     user_utts = recent_user_utterances(session, utterance)
     perception = Perception(
         objection_type=ObjectionType(classification.objection_type),
@@ -201,6 +194,17 @@ async def turn(session: Session, utterance: str) -> None:
     )
     decision = decide(perception)
     print(f"  {C_DIM}decide:{C_END}     {C_YELLOW}{decision.tactic.value}{C_END} — {decision.reasoning}")
+
+    # Discount authority is gated on the tactic, not just session state.
+    # Only the tactics that actually use a discount this turn get authority;
+    # everything else gets 0 so the LLM can't hallucinate a price cut.
+    discount_available = 0
+    ladder = [5, 10]
+    if decision.tactic.value == "CONCESSION_REAL" and len(session.discounts_offered) < len(ladder):
+        discount_available = ladder[len(session.discounts_offered)]
+    elif decision.tactic.value == "SEND_CHECKOUT_LINK_WHATSAPP":
+        # Reflect the highest discount already offered on the checkout link.
+        discount_available = max(session.discounts_offered) if session.discounts_offered else 0
 
     system_prompt = build_speech_system_prompt(
         tactic=decision.tactic.value,
@@ -225,7 +229,9 @@ async def turn(session: Session, utterance: str) -> None:
     session.turn_count += 1
     session.last_tactic = decision.tactic.value
     session.last_subtype = classification.subtype
-    if discount_available and decision.tactic.value in {"CONCESSION_REAL", "SEND_CHECKOUT_LINK_WHATSAPP"}:
+    # Only CONCESSION_REAL adds a NEW tier to the ladder. The WhatsApp tactic
+    # just packages whatever discount was already offered into the link.
+    if discount_available and decision.tactic.value == "CONCESSION_REAL":
         session.discounts_offered.append(discount_available)
 
 

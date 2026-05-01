@@ -91,9 +91,13 @@ async function processTranscript(callId: string, utterance: string): Promise<voi
     stageUpdates.closeAttempted = true;
   }
 
+  // Pre-compute the would-be discount amount for the legacy /generate path.
+  // Under the tactic pipeline, this is replaced below — only granted when
+  // the chosen tactic actually uses a discount, so the LLM can't hallucinate
+  // a price cut on tactics like REFRAME or ISOLATE.
   let discountAmount = 0;
   const decisionSession = { ...currentSession, stage: nextStage };
-  if (shouldOfferDiscount(decisionSession)) {
+  if (!config.USE_TACTIC_PIPELINE && shouldOfferDiscount(decisionSession)) {
     discountAmount = getAvailableDiscount(decisionSession);
     Object.assign(stageUpdates, recordDiscountOffered(decisionSession, discountAmount));
   }
@@ -179,6 +183,19 @@ async function processTranscript(callId: string, utterance: string): Promise<voi
       { tactic: decision.tactic, reasoning: decision.reasoning },
       'Decision made',
     );
+
+    // Discount authority is gated on the chosen tactic. Only CONCESSION_REAL
+    // adds a NEW tier from the ladder; SEND_CHECKOUT_LINK_WHATSAPP reflects
+    // any discount already offered. Anything else gets 0 so the LLM cannot
+    // invent a price cut.
+    if (decision.tactic === 'CONCESSION_REAL' && shouldOfferDiscount(decisionSession)) {
+      discountAmount = getAvailableDiscount(decisionSession);
+      Object.assign(stageUpdates, recordDiscountOffered(decisionSession, discountAmount));
+    } else if (decision.tactic === 'SEND_CHECKOUT_LINK_WHATSAPP') {
+      discountAmount = currentSession.discountsOffered.length
+        ? Math.max(...currentSession.discountsOffered)
+        : 0;
+    }
 
     // Tool dispatch — fire the WhatsApp demo function in parallel with
     // generation. The Speech layer's micro-guidance has the agent
