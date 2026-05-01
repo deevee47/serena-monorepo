@@ -103,6 +103,11 @@ export interface DecideRequest {
   prior_objection_types: ObjectionType[]; // full session history, not just last 4
   discounts_offered: number[]; // e.g. [] | [5] | [5, 10]
   has_alternative_product: boolean;
+  // Voice-channel signals (B-5). All optional. Tactic decision falls back to
+  // pre-B-5 behavior when missing — these only ever add precision.
+  utterance_length_trend?: number | null; // tokens/turn slope across recent USER utterances
+  filler_density?: number | null; // 0.0–1.0 ratio of filler tokens
+  response_latency_ms?: number | null; // most recent USER reply pre-response latency
 }
 
 export interface DecideResponse {

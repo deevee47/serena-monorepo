@@ -6,6 +6,7 @@ short-circuit later ones. Pure-function tests — no mocks, no I/O.
 
 from app.models.requests import ConversationStage, ObjectionType
 from app.services.decision import Perception, decide
+from app.services.signals import SignalSnapshot
 from app.services.tactics import MICRO_GUIDANCE, Tactic
 
 
@@ -21,6 +22,7 @@ def _p(**overrides) -> Perception:
         prior_objection_types=[],
         discounts_offered=[],
         has_alternative_product=False,
+        signals=SignalSnapshot(),
     )
     defaults.update(overrides)
     return Perception(**defaults)
@@ -258,3 +260,81 @@ def test_every_tactic_has_micro_guidance():
     for t in Tactic:
         assert t in MICRO_GUIDANCE, f"missing micro_guidance for {t}"
         assert MICRO_GUIDANCE[t].strip(), f"empty micro_guidance for {t}"
+
+
+# ─── Voice-channel signal rules (B-5) ────────────────────────────────────────
+
+def test_engagement_collapse_overrides_objection_path():
+    # PRICE objection that would normally → ISOLATE, but length trend collapsed.
+    d = decide(_p(
+        objection_type=ObjectionType.PRICE,
+        signals=SignalSnapshot(utterance_length_trend=-2.0),
+    ))
+    assert d.tactic == Tactic.ASK_OPEN
+
+
+def test_mild_negative_trend_does_not_trigger_engagement_collapse():
+    # Below the -1.5 threshold → should NOT override
+    d = decide(_p(
+        objection_type=ObjectionType.PRICE,
+        signals=SignalSnapshot(utterance_length_trend=-0.5),
+    ))
+    assert d.tactic == Tactic.ISOLATE  # normal first-PRICE path
+
+
+def test_engagement_collapse_yields_to_hard_exit():
+    # GRACEFUL_EXIT (priority 1) wins over engagement collapse rule
+    d = decide(_p(
+        score=10,
+        turn_count=8,
+        objection_type=ObjectionType.PRICE,
+        prior_objection_types=[ObjectionType.PRICE] * 3,
+        signals=SignalSnapshot(utterance_length_trend=-3.0),
+    ))
+    assert d.tactic == Tactic.GRACEFUL_EXIT
+
+
+def test_engagement_collapse_yields_to_buying_signal():
+    # If they're showing strong buying signals, ignore the length trend.
+    d = decide(_p(
+        objection_type=ObjectionType.POSITIVE_SIGNAL,
+        objection_subtype="ready_to_buy",
+        signals=SignalSnapshot(utterance_length_trend=-2.5),
+    ))
+    assert d.tactic == Tactic.ASSUMPTIVE_CLOSE
+
+
+def test_high_filler_density_on_first_price_triggers_mirror():
+    # Hesitation marker — they don't yet know what they want; mirror first.
+    d = decide(_p(
+        objection_type=ObjectionType.PRICE,
+        prior_objection_types=[],
+        signals=SignalSnapshot(filler_density=0.20),
+    ))
+    assert d.tactic == Tactic.MIRROR
+
+
+def test_low_filler_density_does_not_trigger_mirror():
+    # Below 0.15 threshold → normal ISOLATE path
+    d = decide(_p(
+        objection_type=ObjectionType.PRICE,
+        prior_objection_types=[],
+        signals=SignalSnapshot(filler_density=0.05),
+    ))
+    assert d.tactic == Tactic.ISOLATE
+
+
+def test_high_filler_density_does_not_override_repeated_price():
+    # Hesitation override only fires on FIRST PRICE, not on repeats.
+    d = decide(_p(
+        objection_type=ObjectionType.PRICE,
+        prior_objection_types=[ObjectionType.PRICE],
+        signals=SignalSnapshot(filler_density=0.30),
+    ))
+    assert d.tactic == Tactic.REFRAME  # normal repeated-PRICE path
+
+
+def test_no_signals_means_legacy_behavior_unchanged():
+    # Sanity: empty SignalSnapshot must produce the same decision as before B-5.
+    d = decide(_p(objection_type=ObjectionType.PRICE, signals=SignalSnapshot()))
+    assert d.tactic == Tactic.ISOLATE

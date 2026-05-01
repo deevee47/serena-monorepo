@@ -4,6 +4,7 @@ from app.lib.limiter import limiter
 from app.models.requests import DecideRequest
 from app.models.responses import DecideResponse
 from app.services.decision import Perception, decide
+from app.services.signals import SignalSnapshot
 from app.utils.logger import get_logger
 
 router = APIRouter()
@@ -23,6 +24,11 @@ async def decide_endpoint(body: DecideRequest, request: Request) -> DecideRespon
         prior_objection_types=body.prior_objection_types,
         discounts_offered=body.discounts_offered,
         has_alternative_product=body.has_alternative_product,
+        signals=SignalSnapshot(
+            utterance_length_trend=body.utterance_length_trend,
+            filler_density=body.filler_density,
+            response_latency_ms=body.response_latency_ms,
+        ),
     )
     decision = decide(perception)
     log.info(
