@@ -110,3 +110,21 @@ export interface DecideResponse {
   reasoning: string; // one-sentence justification for log attribution
   micro_guidance: string; // 3-5 lines for the speech-layer prompt
 }
+
+// ─── Tactic-driven generation ─────────────────────────────────────────────
+// Speech-layer endpoint. Caller has already chosen a tactic (typically by
+// calling /decide); this just expresses it in 1–2 voice-natural sentences
+// using a small focused prompt instead of the legacy 4000-token persona block.
+
+export interface GenerateTacticRequest {
+  call_id: string;
+  utterance: string; // what the customer just said
+  tactic: Tactic;
+  micro_guidance: string;
+  conversation_history?: ConversationTurn[];
+  product_context?: ProductContext | null;
+  alternative_product_context?: ProductContext | null;
+  discount_available?: number;
+}
+
+// Response shape is identical to GenerateResponseResponse (just `text`).

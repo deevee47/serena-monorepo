@@ -6,6 +6,39 @@
 
 ---
 
+## Phase B-4 (shipped) — Tactic-driven Speech layer
+
+Replaces the 4000-token monolithic persona prompt with a small focused prompt
+(~440-500 tokens) built from voice rules + the chosen tactic's micro-guidance
++ product facts + hard constraints. Conversation history is sent as proper
+OpenAI chat messages, not stuffed into the system prompt.
+
+**End-to-end measured output (5 live scenarios, real LLM):**
+
+| Customer | Tactic | Agent reply |
+|---|---|---|
+| "that's way too expensive for me" | `ISOLATE` | "If the price were within your budget, would this be the one for you?" |
+| "still too pricey" (2nd PRICE) | `REFRAME` | "Think of it as a daily investment in your comfort and productivity. Over five years, that's just a few cents a day for a better work experience." |
+| "I don't really trust new brands" | `ASK_OPEN` | "What do you usually look for in a brand to build that trust?" |
+
+No "Absolutely!", no "Great question!", no "Alex" persona leak. 1-2 sentences each, voice-natural.
+
+**New files:**
+- [services/speech_prompt_builder.py](fastapi-brain/app/services/speech_prompt_builder.py) — `build_speech_system_prompt()` + `build_speech_messages()`
+- [tests/unit/test_speech_prompt_builder.py](fastapi-brain/tests/unit/test_speech_prompt_builder.py) — 19 tests asserting size cap, no persona scaffolding, no psychology / score-mode / playbook leftovers, voice rules + hard constraints present
+- [scripts/smoke-test-generate-tactic.py](scripts/smoke-test-generate-tactic.py) — end-to-end CLI: classify → decide → generate
+
+**Modified:**
+- [routes/generate.py](fastapi-brain/app/routes/generate.py) — adds `POST /generate-tactic` and `POST /generate-tactic/stream` (legacy `/generate` and `/generate/stream` untouched)
+- [models/requests.py](fastapi-brain/app/models/requests.py) — `GenerateTacticRequest`
+- [shared/contracts/brain-api.types.ts](shared/contracts/brain-api.types.ts) — `GenerateTacticRequest` for node-gateway
+
+**Backwards compatible:** new endpoints, no existing route changed. Node-gateway can call `/decide` then `/generate-tactic` to opt into the new pipeline; or keep using `/generate` for the legacy persona prompt.
+
+**Speech prompt size:** ~1700-2000 chars (~430-500 tokens) — vs ~16000 chars / ~4000 tokens for the legacy persona prompt. ~8× reduction.
+
+---
+
 ## Phase B-3 (shipped) — Decision layer (tactic library + rules engine)
 
 A pure rules engine that takes a `Perception` (objection type + subtype +
@@ -157,7 +190,7 @@ Vapi gives metadata text agents don't have:
 | **B-1** ✅ | Pinecone classifier — Perception foundation | shipped |
 | **B-2** ✅ | Sub-typed objections — vote() surfaces consensus subtype, threaded through API | shipped |
 | **B-3** ✅ | Decision layer — tactic library + rules engine + /decide endpoint | shipped |
-| **B-4** | Speech layer — strip prompt to voice rules + per-tactic micro-prompts | ~2 days |
+| **B-4** ✅ | Speech layer — small voice-rules + tactic micro-guidance prompt + /generate-tactic | shipped |
 | **B-5** | Voice-channel signals — interruption / latency / length-trend into Perception | ~1 day |
 | **B-6** | Tactic logging — `tactic_used` on every CallTurn for the learning loop | ~0.5 day |
 
