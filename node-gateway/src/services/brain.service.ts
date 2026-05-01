@@ -24,6 +24,9 @@ export type ClassifyObjectionResponse = {
   objection_type: ObjectionType;
   confidence: number;
   sentiment: 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL';
+  // B-2: fine-grained subtype, populated by the Pinecone classifier path.
+  // null on LLM fallback. Examples: 'too_expensive', 'found_cheaper', etc.
+  subtype?: string | null;
 };
 
 export type GenerateResponseRequest = {
@@ -40,6 +43,54 @@ export type GenerateResponseRequest = {
 
 export type GenerateResponseResponse = {
   text: string;
+};
+
+// ─── Tactic-driven pipeline (Decision + Speech) ────────────────────────────
+// Mirrors shared/contracts/brain-api.types.ts.
+
+export type Tactic =
+  | 'ASK_OPEN'
+  | 'ASK_DISQUALIFY'
+  | 'MIRROR'
+  | 'ISOLATE'
+  | 'REFRAME'
+  | 'CONCESSION_REAL'
+  | 'CONCESSION_NON_MONETARY'
+  | 'ALTERNATIVE_PIVOT'
+  | 'PERMISSION_PUSH'
+  | 'TIME_CAPTURE'
+  | 'TRIAL_CLOSE'
+  | 'ASSUMPTIVE_CLOSE'
+  | 'GRACEFUL_EXIT';
+
+export type DecideRequest = {
+  call_id: string;
+  objection_type: ObjectionType | null;
+  objection_subtype?: string | null;
+  sentiment?: 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL' | null;
+  stage: ConversationStage;
+  score: number;
+  turn_count: number;
+  prior_objection_types: ObjectionType[];
+  discounts_offered: number[];
+  has_alternative_product: boolean;
+};
+
+export type DecideResponse = {
+  tactic: Tactic;
+  reasoning: string;
+  micro_guidance: string;
+};
+
+export type GenerateTacticRequest = {
+  call_id: string;
+  utterance: string;
+  tactic: Tactic;
+  micro_guidance: string;
+  conversation_history?: BrainConversationTurn[];
+  product_context?: ProductContext | null;
+  alternative_product_context?: ProductContext | null;
+  discount_available?: number;
 };
 
 export type AlternativesRequest = {
@@ -149,6 +200,7 @@ classifyBreaker.fallback(() => ({
   objection_type: 'NEUTRAL' as ObjectionType,
   sentiment: 'NEUTRAL' as const,
   confidence: 0.0,
+  subtype: null,
 }));
 
 const generateBreaker = new CircuitBreaker(generateFn, {
@@ -167,6 +219,147 @@ export async function classifyObjection(req: ClassifyObjectionRequest): Promise<
 
 export async function generateResponse(req: GenerateResponseRequest): Promise<GenerateResponseResponse> {
   return generateBreaker.fire(req) as Promise<GenerateResponseResponse>;
+}
+
+// ─── /decide ──────────────────────────────────────────────────────────────
+async function decideFn(req: DecideRequest): Promise<DecideResponse> {
+  const start = Date.now();
+  try {
+    const result = await client.post('decide', { json: req }).json<DecideResponse>();
+    logger.debug({ call_id: req.call_id, endpoint: 'decide', duration_ms: Date.now() - start }, 'Brain call');
+    return result;
+  } catch (err) {
+    const details = getBrainErrorDetails(err);
+    logger.error({ call_id: req.call_id, err, brain_error: details }, 'Brain decide error');
+    if (details.statusCode === 504) {
+      throw new AppError(504, ErrorCodes.BRAIN_TIMEOUT, 'Brain timeout on decide', details.details);
+    }
+    throw new AppError(
+      details.statusCode ?? 503,
+      ErrorCodes.BRAIN_UNREACHABLE,
+      details.message,
+      details.details,
+    );
+  }
+}
+
+const decideBreaker = new CircuitBreaker(decideFn, {
+  timeout: 5000,
+  errorThresholdPercentage: 50,
+  resetTimeout: 30000,
+  volumeThreshold: 5,
+});
+// Fallback when /decide is unavailable: pick a safe default tactic. ASK_OPEN
+// is the lowest-risk choice — surfaces information without committing to a
+// stance. Includes minimal micro-guidance so the speech prompt still works.
+decideBreaker.fallback(
+  (): DecideResponse => ({
+    tactic: 'ASK_OPEN',
+    reasoning: 'decide endpoint unavailable — safe fallback to deepen understanding',
+    micro_guidance:
+      'Ask one open question to find out what they care about. Stop after the question.',
+  }),
+);
+
+export async function decide(req: DecideRequest): Promise<DecideResponse> {
+  return decideBreaker.fire(req) as Promise<DecideResponse>;
+}
+
+// ─── /generate-tactic ─────────────────────────────────────────────────────
+async function generateTacticFn(req: GenerateTacticRequest): Promise<GenerateResponseResponse> {
+  const start = Date.now();
+  try {
+    const result = await client.post('generate-tactic', { json: req }).json<GenerateResponseResponse>();
+    logger.debug({ call_id: req.call_id, endpoint: 'generate-tactic', duration_ms: Date.now() - start }, 'Brain call');
+    return result;
+  } catch (err) {
+    const details = getBrainErrorDetails(err);
+    logger.error({ call_id: req.call_id, err, brain_error: details }, 'Brain generate-tactic error');
+    if (details.statusCode === 504) {
+      throw new AppError(504, ErrorCodes.BRAIN_TIMEOUT, 'Brain timeout on generate-tactic', details.details);
+    }
+    throw new AppError(
+      details.statusCode ?? 503,
+      ErrorCodes.BRAIN_UNREACHABLE,
+      details.message,
+      details.details,
+    );
+  }
+}
+
+const generateTacticBreaker = new CircuitBreaker(generateTacticFn, {
+  timeout: 12000,
+  errorThresholdPercentage: 50,
+  resetTimeout: 30000,
+  volumeThreshold: 5,
+});
+// No stage on this request — fall back to a generic "give me a moment" line.
+generateTacticBreaker.fallback(
+  (): GenerateResponseResponse => ({ text: 'Give me just a moment.' }),
+);
+
+export async function generateTactic(req: GenerateTacticRequest): Promise<GenerateResponseResponse> {
+  return generateTacticBreaker.fire(req) as Promise<GenerateResponseResponse>;
+}
+
+// SSE streaming variant — same pattern as generateResponseStream so we can
+// fire Vapi /say on the first chunk for low time-to-first-word.
+export async function generateTacticStream(
+  req: GenerateTacticRequest,
+  onChunk: (text: string) => void,
+): Promise<string> {
+  const buffer: string[] = [];
+
+  try {
+    const response = await fetch(`${config.FASTAPI_BRAIN_URL}/generate-tactic/stream`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Internal-Secret': config.INTERNAL_SERVICE_SECRET,
+        'X-Call-ID': req.call_id,
+      },
+      body: JSON.stringify(req),
+      signal: AbortSignal.timeout(15_000),
+    });
+
+    if (!response.ok || !response.body) {
+      throw new Error(`generate-tactic stream request failed: ${response.status}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let lineBuffer = '';
+    let finished = false;
+
+    while (!finished) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      lineBuffer += decoder.decode(value, { stream: true });
+      const lines = lineBuffer.split('\n');
+      lineBuffer = lines.pop() ?? '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6).trim();
+        if (data === '[DONE]') { finished = true; break; }
+        try {
+          const parsed = JSON.parse(data) as { text: string };
+          buffer.push(parsed.text);
+          onChunk(parsed.text);
+        } catch {
+          // ignore malformed SSE lines
+        }
+      }
+    }
+
+    return buffer.join('').trim() || 'Give me just a moment.';
+  } catch (err) {
+    logger.error({ call_id: req.call_id, err }, 'generateTacticStream failed — using buffered partial or non-streaming retry');
+    const partial = buffer.join('').trim();
+    if (partial) return partial;
+    const result = await generateTactic(req).catch(() => ({ text: 'Give me just a moment.' }));
+    return result.text;
+  }
 }
 
 async function alternativesFn(req: AlternativesRequest): Promise<AlternativesResponse> {
