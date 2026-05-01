@@ -52,6 +52,7 @@ export interface GenerateResponseRequest {
   objection_type: ObjectionType | null;
   conversation_history: ConversationTurn[]; // last 4 turns only
   product_context: ProductContext | null;
+  alternative_product_context?: ProductContext | null;
 }
 
 export interface GenerateResponseResponse {

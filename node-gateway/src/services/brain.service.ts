@@ -35,6 +35,7 @@ export type GenerateResponseRequest = {
   objection_type: ObjectionType | null;
   conversation_history: BrainConversationTurn[];
   product_context: ProductContext | null;
+  alternative_product_context?: ProductContext | null;
 };
 
 export type GenerateResponseResponse = {
@@ -66,6 +67,36 @@ const client = got.extend({
   headers: { 'X-Internal-Secret': config.INTERNAL_SERVICE_SECRET },
 });
 
+function getBrainErrorDetails(err: unknown): { statusCode?: number; message: string; details?: unknown } {
+  if (err instanceof Error && err.name === 'TimeoutError') {
+    return { statusCode: 504, message: 'Brain request timed out' };
+  }
+
+  if (typeof err === 'object' && err !== null && 'response' in err) {
+    const response = (err as {
+      response?: {
+        statusCode?: number;
+        body?: unknown;
+      };
+    }).response;
+    const body = response?.body;
+    const brainMessage =
+      typeof body === 'object' && body !== null && 'error' in body
+        ? (body as { error?: { message?: string } }).error?.message
+        : undefined;
+
+    return {
+      statusCode: response?.statusCode,
+      message: brainMessage ?? (err instanceof Error ? err.message : 'Brain request failed'),
+      details: body,
+    };
+  }
+
+  return {
+    message: err instanceof Error ? err.message : 'Brain request failed',
+  };
+}
+
 async function classifyFn(req: ClassifyObjectionRequest): Promise<ClassifyObjectionResponse> {
   const start = Date.now();
   try {
@@ -73,11 +104,17 @@ async function classifyFn(req: ClassifyObjectionRequest): Promise<ClassifyObject
     logger.debug({ call_id: req.call_id, endpoint: 'classify', duration_ms: Date.now() - start }, 'Brain call');
     return result;
   } catch (err) {
-    logger.error({ call_id: req.call_id, err }, 'Brain classify error');
-    if (err instanceof Error && err.name === 'TimeoutError') {
-      throw new AppError(504, ErrorCodes.BRAIN_TIMEOUT, 'Brain timeout on classify');
+    const details = getBrainErrorDetails(err);
+    logger.error({ call_id: req.call_id, err, brain_error: details }, 'Brain classify error');
+    if (details.statusCode === 504) {
+      throw new AppError(504, ErrorCodes.BRAIN_TIMEOUT, 'Brain timeout on classify', details.details);
     }
-    throw new AppError(503, ErrorCodes.BRAIN_UNREACHABLE, 'Brain unreachable on classify');
+    throw new AppError(
+      details.statusCode ?? 503,
+      ErrorCodes.BRAIN_UNREACHABLE,
+      details.message,
+      details.details,
+    );
   }
 }
 
@@ -88,11 +125,17 @@ async function generateFn(req: GenerateResponseRequest): Promise<GenerateRespons
     logger.debug({ call_id: req.call_id, endpoint: 'generate', duration_ms: Date.now() - start }, 'Brain call');
     return result;
   } catch (err) {
-    logger.error({ call_id: req.call_id, err }, 'Brain generate error');
-    if (err instanceof Error && err.name === 'TimeoutError') {
-      throw new AppError(504, ErrorCodes.BRAIN_TIMEOUT, 'Brain timeout on generate');
+    const details = getBrainErrorDetails(err);
+    logger.error({ call_id: req.call_id, err, brain_error: details }, 'Brain generate error');
+    if (details.statusCode === 504) {
+      throw new AppError(504, ErrorCodes.BRAIN_TIMEOUT, 'Brain timeout on generate', details.details);
     }
-    throw new AppError(503, ErrorCodes.BRAIN_UNREACHABLE, 'Brain unreachable on generate');
+    throw new AppError(
+      details.statusCode ?? 503,
+      ErrorCodes.BRAIN_UNREACHABLE,
+      details.message,
+      details.details,
+    );
   }
 }
 

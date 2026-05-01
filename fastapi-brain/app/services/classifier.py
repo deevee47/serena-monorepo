@@ -1,6 +1,29 @@
-from openai import AsyncOpenAI
+"""Hybrid objection classifier: Pinecone NN (fast) with LLM fallback.
+
+Mode is set by `settings.classifier_mode`:
+  - "pinecone"  Try Pinecone NN first; fall back to LLM if low confidence/error.
+  - "shadow"    Run both; return LLM result; log Pinecone result for offline
+                comparison. Use this during initial rollout to validate accuracy.
+  - "llm"       Original behavior — LLM only. Kill switch for instant rollback.
+
+Public API is unchanged: `classify_objection(...) -> (type, sentiment, confidence)`.
+"""
+
+import asyncio
+
+from openai import (
+    APIConnectionError,
+    APIError,
+    APITimeoutError,
+    AsyncOpenAI,
+    AuthenticationError,
+    RateLimitError,
+)
 
 from app.config.settings import settings
+from app.services.objection_index import classify_via_pinecone
+from app.utils.errors import ClassificationError
+from app.utils.logger import get_logger
 
 FEW_SHOT_EXAMPLES = [
     ("That's too expensive for me", "PRICE NEGATIVE"),
@@ -23,6 +46,62 @@ VALID_SENTIMENTS = {"POSITIVE", "NEGATIVE", "NEUTRAL"}
 
 async def classify_objection(utterance: str, stage: str, score: int, call_id: str) -> tuple[str, str, float]:
     """Returns (objection_type, sentiment, confidence)."""
+    log = get_logger(call_id)
+    mode = settings.classifier_mode
+
+    if mode == "llm":
+        return await _classify_with_llm(utterance, call_id)
+
+    if mode == "shadow":
+        # Run both; return LLM result; log agreement.
+        pinecone_task = asyncio.create_task(_safe_classify_via_pinecone(utterance, call_id))
+        llm_result = await _classify_with_llm(utterance, call_id)
+        pinecone_result = await pinecone_task
+        agreement = (
+            pinecone_result is not None
+            and pinecone_result.objection_type == llm_result[0]
+            and pinecone_result.sentiment == llm_result[1]
+        )
+        log.info(
+            "classifier_shadow",
+            utterance=utterance[:80],
+            llm=llm_result,
+            pinecone=pinecone_result._asdict() if pinecone_result else None,
+            agreement=agreement,
+        )
+        return llm_result
+
+    # mode == "pinecone": Pinecone first, LLM fallback on low confidence/error.
+    pinecone_result = await _safe_classify_via_pinecone(utterance, call_id)
+    if pinecone_result is not None:
+        log.info(
+            "classifier_pinecone_hit",
+            utterance=utterance[:80],
+            label=(pinecone_result.objection_type, pinecone_result.sentiment),
+            confidence=round(pinecone_result.confidence, 3),
+            method=pinecone_result.method,
+        )
+        return pinecone_result.objection_type, pinecone_result.sentiment, pinecone_result.confidence
+
+    log.info("classifier_pinecone_miss_falling_back_to_llm", utterance=utterance[:80])
+    return await _classify_with_llm(utterance, call_id)
+
+
+async def _safe_classify_via_pinecone(utterance: str, call_id: str):
+    """Wraps the Pinecone path so any error becomes a graceful fallback."""
+    log = get_logger(call_id)
+    try:
+        return await asyncio.wait_for(classify_via_pinecone(utterance, call_id), timeout=2.0)
+    except asyncio.TimeoutError:
+        log.warning("classifier_pinecone_timeout", utterance=utterance[:80])
+        return None
+    except Exception as exc:  # noqa: BLE001 — any failure must fall back, not raise
+        log.warning("classifier_pinecone_error", error_type=type(exc).__name__, message=str(exc))
+        return None
+
+
+async def _classify_with_llm(utterance: str, call_id: str) -> tuple[str, str, float]:
+    log = get_logger(call_id)
     client = AsyncOpenAI(api_key=settings.llm_api_key)
 
     messages: list[dict] = [
@@ -42,12 +121,28 @@ async def classify_objection(utterance: str, stage: str, score: int, call_id: st
         messages.append({"role": "assistant", "content": label})
     messages.append({"role": "user", "content": utterance})
 
-    response = await client.chat.completions.create(
-        model=settings.openai_classifier_model,
-        messages=messages,
-        max_tokens=20,
-        temperature=0,
-    )
+    try:
+        response = await client.chat.completions.create(
+            model=settings.openai_classifier_model,
+            messages=messages,
+            max_tokens=20,
+            temperature=0,
+        )
+    except AuthenticationError as exc:
+        log.error("classifier_error", error_type=type(exc).__name__, message=str(exc))
+        raise ClassificationError("OpenAI authentication failed. Check OPENAI_API_KEY.") from exc
+    except RateLimitError as exc:
+        log.error("classifier_error", error_type=type(exc).__name__, message=str(exc))
+        raise ClassificationError("Rate limit reached, try again shortly") from exc
+    except APITimeoutError as exc:
+        log.error("classifier_error", error_type=type(exc).__name__, message=str(exc))
+        raise ClassificationError("Classifier timed out") from exc
+    except APIConnectionError as exc:
+        log.error("classifier_error", error_type=type(exc).__name__, message=str(exc))
+        raise ClassificationError("OpenAI connection failed. Check network/DNS access.") from exc
+    except APIError as exc:
+        log.error("classifier_error", error_type=type(exc).__name__, message=str(exc))
+        raise ClassificationError(f"Classifier API error: {exc.message}") from exc
 
     raw = (response.choices[0].message.content or "NEUTRAL NEUTRAL").strip().upper()
     parts = raw.split()
