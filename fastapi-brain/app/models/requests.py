@@ -40,8 +40,7 @@ class ProductContext(BaseModel):
 
 
 class CartItem(BaseModel):
-    """A line item in the customer's abandoned cart. Demo-grade — real
-    integrations should source this from the storefront's cart service."""
+    """A line item in the customer's abandoned cart."""
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -61,6 +60,42 @@ class CartContext(BaseModel):
     abandoned_minutes_ago: int | None = None
 
 
+class CustomerSegment(StrEnum):
+    FIRST_TIME = "FIRST_TIME"
+    RETURNING = "RETURNING"
+    VIP = "VIP"
+    LAPSED = "LAPSED"
+
+
+class PastOrderSummary(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    product_id: str
+    product_name: str
+    price: float
+    days_ago: int
+
+
+class CustomerContext(BaseModel):
+    """Everything the agent should know about who it's talking to before
+    saying anything. Sourced from the Customer + Purchase + Call tables.
+
+    All fields except phone are optional — first-time unknown callers will
+    have only phone populated, and the prompt builder degrades gracefully."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    phone: str
+    name: str | None = None
+    email: str | None = None
+    segment: CustomerSegment = CustomerSegment.FIRST_TIME
+    lifetime_value: float = 0.0
+    prior_calls_count: int = 0
+    timezone: str | None = None
+    preferred_contact: str | None = None  # 'whatsapp' | 'email' | 'phone'
+    past_orders: list[PastOrderSummary] = []  # most recent 5
+
+
 class ClassifyObjectionRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -68,20 +103,6 @@ class ClassifyObjectionRequest(BaseModel):
     utterance: str
     stage: ConversationStage
     score: int
-
-
-class GenerateResponseRequest(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
-    call_id: str
-    utterance: str
-    stage: ConversationStage
-    score: int
-    discount_available: int
-    objection_type: ObjectionType | None = None
-    conversation_history: list[ConversationTurn]
-    product_context: ProductContext | None = None
-    alternative_product_context: ProductContext | None = None
 
 
 class AlternativesRequest(BaseModel):
@@ -95,8 +116,8 @@ class AlternativesRequest(BaseModel):
 
 class ConverseRequest(BaseModel):
     """Single-call function-calling LLM converse request. The LLM gets the
-    conversation history, the product/cart facts, and the tool schemas — it
-    decides whether to talk, call a tool, or both."""
+    conversation history, the product/cart/customer facts, and the tool
+    schemas — it decides whether to talk, call a tool, or both."""
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -106,31 +127,5 @@ class ConverseRequest(BaseModel):
     product_context: ProductContext | None = None
     alternative_product_context: ProductContext | None = None
     cart_context: CartContext | None = None
+    customer_context: CustomerContext | None = None
     discounts_already_offered: list[int] = []  # e.g. [] | [5] | [5, 10]
-
-
-class DecideRequest(BaseModel):
-    """Inputs the rules engine needs to pick a tactic. Built by node-gateway
-    from live session state + the latest classifier output."""
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    call_id: str
-    objection_type: ObjectionType | None = None
-    objection_subtype: str | None = None
-    sentiment: str | None = None  # 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL'
-    stage: ConversationStage
-    score: int
-    turn_count: int = 0
-    prior_objection_types: list[ObjectionType] = []
-    discounts_offered: list[int] = []
-    has_alternative_product: bool = False
-    # Voice-channel signals (B-5). All optional — when missing, signal-driven
-    # rules in decide() are skipped and behavior is identical to pre-B-5.
-    utterance_length_trend: float | None = None
-    filler_density: float | None = None
-    response_latency_ms: int | None = None
-    # When True, the rules engine will pick SEND_*_WHATSAPP tactics on close /
-    # graceful-exit instead of pure verbal moves. Default False so existing
-    # callers see no behavior change.
-    whatsapp_available: bool = False
