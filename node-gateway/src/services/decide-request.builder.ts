@@ -20,6 +20,10 @@ export interface DecideRequest {
   utterance_length_trend?: number | null;
   filler_density?: number | null;
   response_latency_ms?: number | null;
+  // True when the agent has a real channel to send messages on (WhatsApp).
+  // The brain's rules use this to upgrade close / exit verbal moves into
+  // actual SEND_*_WHATSAPP tactics that the gateway then executes.
+  whatsapp_available?: boolean;
 }
 
 /**
@@ -43,6 +47,7 @@ export function buildDecideRequest(args: {
   // Recent USER utterances (oldest → newest, up to ~5). Used to derive
   // voice-channel signals for the rules engine. Pass [] if not available.
   recentUserUtterances?: string[];
+  whatsappAvailable?: boolean;
 }): DecideRequest {
   const utterances = args.recentUserUtterances ?? [];
   return {
@@ -59,5 +64,6 @@ export function buildDecideRequest(args: {
     utterance_length_trend: utteranceLengthTrend(utterances),
     filler_density: fillerDensity(utterances),
     response_latency_ms: null, // requires Vapi speech-update events; future work
+    whatsapp_available: args.whatsappAvailable ?? false,
   };
 }

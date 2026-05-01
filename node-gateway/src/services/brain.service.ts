@@ -61,7 +61,9 @@ export type Tactic =
   | 'TIME_CAPTURE'
   | 'TRIAL_CLOSE'
   | 'ASSUMPTIVE_CLOSE'
-  | 'GRACEFUL_EXIT';
+  | 'GRACEFUL_EXIT'
+  | 'SEND_CHECKOUT_LINK_WHATSAPP'
+  | 'SEND_PRODUCT_INFO_WHATSAPP';
 
 // DecideRequest lives in decide-request.builder.ts so the (pure) builder
 // module has no transitive dependency on this file (which loads env config).

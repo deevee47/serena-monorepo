@@ -26,6 +26,11 @@ class Tactic(StrEnum):
     TRIAL_CLOSE = "TRIAL_CLOSE"
     ASSUMPTIVE_CLOSE = "ASSUMPTIVE_CLOSE"
     GRACEFUL_EXIT = "GRACEFUL_EXIT"
+    # Tool-call tactics — picked when the agent has an actual mechanism to
+    # follow through with (e.g. WhatsApp). The Speech layer makes the agent
+    # confirm the action naturally; the gateway fires the real send.
+    SEND_CHECKOUT_LINK_WHATSAPP = "SEND_CHECKOUT_LINK_WHATSAPP"
+    SEND_PRODUCT_INFO_WHATSAPP = "SEND_PRODUCT_INFO_WHATSAPP"
 
 
 @dataclass(frozen=True)
@@ -107,6 +112,18 @@ MICRO_GUIDANCE: dict[Tactic, str] = {
         "Release them. No last-ditch pitch, no guilt, no urgency.\n"
         "'All good — I'll send a link, use it whenever.'\n"
         "Failed pursuit kills the relationship and any future call."
+    ),
+    Tactic.SEND_CHECKOUT_LINK_WHATSAPP: (
+        "Confirm — naturally — that you're sending a checkout link to their\n"
+        "WhatsApp right now. Specific and short: 'Sending you the checkout\n"
+        "link on WhatsApp now — should land in a few seconds.'\n"
+        "Do NOT ask for permission. Do NOT re-pitch. State the action."
+    ),
+    Tactic.SEND_PRODUCT_INFO_WHATSAPP: (
+        "Tell them you're sending the product details to their WhatsApp so\n"
+        "they can decide on their own time. No pressure, no urgency.\n"
+        "'Cool — shooting the product details to your WhatsApp now. Look\n"
+        "it over whenever, no rush.'"
     ),
 }
 

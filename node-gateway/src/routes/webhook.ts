@@ -44,6 +44,10 @@ interface RequestWithRawBody extends FastifyRequest {
 }
 
 import { buildDecideRequest } from '../services/decide-request.builder.js';
+import {
+  sendCheckoutLinkOnWhatsApp,
+  sendProductInfoOnWhatsApp,
+} from '../services/whatsapp.service.js';
 
 // Per-call concurrency lock — chains processTranscript without blocking the HTTP response
 const callLocks = new Map<string, Promise<void>>();
@@ -162,6 +166,10 @@ async function processTranscript(callId: string, utterance: string): Promise<voi
       discountsOffered: currentSession.discountsOffered,
       hasAlternativeProduct: alternativeProductContext !== null,
       recentUserUtterances,
+      // Phone is the WhatsApp identity for the demo. Always true for a real
+      // Vapi call (phone is required for the call to exist). Use 'unknown'
+      // sentinel from session.service when the number wasn't captured.
+      whatsappAvailable: currentSession.phoneNumber !== 'unknown',
     });
 
     const decision = await decideTactic(decideReq);
@@ -171,6 +179,26 @@ async function processTranscript(callId: string, utterance: string): Promise<voi
       { tactic: decision.tactic, reasoning: decision.reasoning },
       'Decision made',
     );
+
+    // Tool dispatch — fire the WhatsApp demo function in parallel with
+    // generation. The Speech layer's micro-guidance has the agent
+    // verbally confirm the same action.
+    if (decision.tactic === 'SEND_CHECKOUT_LINK_WHATSAPP' && product) {
+      sendCheckoutLinkOnWhatsApp({
+        to: currentSession.phoneNumber,
+        productId: product.id,
+        productName: product.name,
+        price: product.price,
+        discountPercent: discountAmount,
+      });
+    } else if (decision.tactic === 'SEND_PRODUCT_INFO_WHATSAPP' && product) {
+      sendProductInfoOnWhatsApp({
+        to: currentSession.phoneNumber,
+        productId: product.id,
+        productName: product.name,
+        price: product.price,
+      });
+    }
 
     generatedText = await generateTacticStream(
       {

@@ -6,6 +6,45 @@
 
 ---
 
+## WhatsApp tool-call demo + interactive CLI (shipped)
+
+First real "tool" the agent can invoke mid-conversation. Two new tactics that
+upgrade close / graceful-exit verbal moves into actual sends:
+
+| Tactic | Replaces | Fires when |
+|---|---|---|
+| `SEND_CHECKOUT_LINK_WHATSAPP` | `ASSUMPTIVE_CLOSE` | strong buying signal **AND** `whatsapp_available=True` |
+| `SEND_PRODUCT_INFO_WHATSAPP` | `GRACEFUL_EXIT` | low score (recoverable) **AND** `whatsapp_available=True` |
+
+`whatsapp_available` defaults to `False` so existing tests / callers see no
+behavior change. Node-gateway sets it to `True` when the session has a real
+phone number (always true for a Vapi call).
+
+When one of these tactics fires, **two things happen in parallel**:
+1. Speech layer makes the agent confirm the action naturally — *"Sending you the checkout link on WhatsApp now."*
+2. Gateway calls the matching function in [whatsapp.service.ts](node-gateway/src/services/whatsapp.service.ts) — currently a demo that logs the would-be send and returns a fake message id.
+
+To make it real: swap `simulateSend` for a fetch to the WhatsApp Business API or a Twilio/MessageBird wrapper. The function signatures are the contract.
+
+### Interactive CLI
+
+[scripts/interactive-cli.py](scripts/interactive-cli.py) lets you type customer responses and see the agent reply against the real LLM, real Pinecone classifier, real rules engine — no telephony, no node-gateway, no DB. Per turn it prints classifier label + subtype, the chosen tactic + reasoning, and (when relevant) the simulated WhatsApp send.
+
+```bash
+cd fastapi-brain && uv run python ../scripts/interactive-cli.py
+```
+
+Live example (from a real run):
+```
+you › yeah let's go ahead with it
+  classifier: POSITIVE_SIGNAL POSITIVE subtype=ready_to_buy conf=1.00
+  decide:     SEND_CHECKOUT_LINK_WHATSAPP — explicit buying signal + WhatsApp available
+  agent →     Sending you the checkout link on WhatsApp now — should land in a few seconds.
+  [DEMO whatsapp → +15551234567] Checkout — ZephyrChair Pro: $349.00 | https://shop.example/checkout/prod-001?d=0
+```
+
+---
+
 ## Voice-channel signals into the rules engine (shipped)
 
 The Decision layer can now react to *how* the customer is talking, not just
