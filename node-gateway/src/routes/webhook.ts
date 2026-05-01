@@ -145,6 +145,13 @@ async function processTranscript(callId: string, utterance: string): Promise<voi
 
   if (config.USE_TACTIC_PIPELINE) {
     // New pipeline: classify → decide → generate-tactic
+    // Gather the last few USER utterances (including the current one) for
+    // voice-channel signal derivation. Recent first → reverse to oldest-first.
+    const recentUserUtterances = [
+      ...rawHistory.filter((t) => t.speaker === 'USER').map((t) => t.utterance),
+      utterance,
+    ].slice(-5);
+
     const decideReq = buildDecideRequest({
       callId,
       classification: classify,
@@ -154,6 +161,7 @@ async function processTranscript(callId: string, utterance: string): Promise<voi
       priorObjections: session.objectionsEncountered, // pre-this-turn history
       discountsOffered: currentSession.discountsOffered,
       hasAlternativeProduct: alternativeProductContext !== null,
+      recentUserUtterances,
     });
 
     const decision = await decideTactic(decideReq);

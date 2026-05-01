@@ -13,9 +13,10 @@ The first rule that matches wins. Each branch returns a Decision with a
 one-sentence `reasoning` for log attribution.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.models.requests import ConversationStage, ObjectionType
+from app.services.signals import SignalSnapshot
 from app.services.tactics import Decision, Tactic, micro_guidance
 
 
@@ -36,12 +37,21 @@ class Perception:
     prior_objection_types: list[ObjectionType]
     discounts_offered: list[int]  # e.g. [] | [5] | [5, 10]
     has_alternative_product: bool
+    # Voice-channel signals derived from recent utterances. Optional — when
+    # missing, signal-driven rules are skipped and the rules engine behaves
+    # exactly as it did before signals were added.
+    signals: SignalSnapshot = field(default_factory=SignalSnapshot)
 
 
 # Score thresholds — duplicated as named constants so changes are searchable.
 SCORE_GRACEFUL_EXIT = 20
 SCORE_TRIAL_CLOSE = 70
 SCORE_ASSUMPTIVE_CLOSE = 80
+
+# Voice-signal thresholds. Tuned conservatively — only fire when the signal is
+# unambiguous. Calibration data from production logs may move these later.
+ENGAGEMENT_COLLAPSE_SLOPE = -1.5  # tokens per turn — sustained shrinking
+HIGH_FILLER_DENSITY = 0.15  # fraction of tokens that are fillers
 
 
 def decide(p: Perception) -> Decision:
@@ -73,6 +83,32 @@ def decide(p: Perception) -> Decision:
     if p.stage == ConversationStage.CLOSE:
         return _decision(Tactic.ASSUMPTIVE_CLOSE, "stage is CLOSE — proceed to logistics")
 
+    # 2.5 Voice-channel signal overrides (only when signals are present) ---
+    # Engagement collapse: utterances are getting sharply shorter.
+    # No clever objection handling will help — re-engage with curiosity.
+    slope = p.signals.utterance_length_trend
+    if slope is not None and slope <= ENGAGEMENT_COLLAPSE_SLOPE:
+        return _decision(
+            Tactic.ASK_OPEN,
+            f"engagement collapsing (length trend {slope:+.1f} tok/turn) — re-engage with one curious question",
+        )
+
+    prior_price_count = p.prior_objection_types.count(ObjectionType.PRICE)
+
+    # High hesitation marker on a first PRICE objection — they're uncertain
+    # themselves; mirror so they articulate before isolating.
+    fillers = p.signals.filler_density
+    if (
+        fillers is not None
+        and fillers >= HIGH_FILLER_DENSITY
+        and p.objection_type == ObjectionType.PRICE
+        and prior_price_count == 0
+    ):
+        return _decision(
+            Tactic.MIRROR,
+            f"high hesitation (filler density {fillers:.2f}) on first PRICE — mirror before isolating",
+        )
+
     # 3. Discovery openers --------------------------------------------------
     if p.stage == ConversationStage.INTRO and p.turn_count <= 1:
         return _decision(Tactic.ASK_OPEN, "INTRO stage, opening turn — discover before pitching")
@@ -86,7 +122,7 @@ def decide(p: Perception) -> Decision:
         )
 
     # 4. Objection-specific paths -------------------------------------------
-    prior_price_count = p.prior_objection_types.count(ObjectionType.PRICE)
+    # prior_price_count was computed earlier for the signal rules; reuse it.
     prior_trust_count = p.prior_objection_types.count(ObjectionType.TRUST)
     prior_timing_count = p.prior_objection_types.count(ObjectionType.TIMING)
     discounts_count = len(p.discounts_offered)
