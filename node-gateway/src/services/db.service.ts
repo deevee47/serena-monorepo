@@ -6,11 +6,16 @@ export interface CallTurnData {
   speaker: 'USER' | 'AGENT';
   utterance: string;
   objectionType?: string;
+  objectionSubtype?: string | null;
   sentiment?: 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL';
   scoreBefore: number;
   scoreAfter: number;
   stage: string;
   discountOffered?: number;
+  // Tactic attribution — only set on AGENT turns under the tactic pipeline.
+  tactic?: string | null;
+  tacticReasoning?: string | null;
+  pipeline?: 'tactic' | 'legacy' | null;
 }
 
 export interface CallEndUpdate {
@@ -47,11 +52,15 @@ export async function insertCallTurn(callId: string, turn: CallTurnData): Promis
       speaker: turn.speaker,
       utterance: turn.utterance,
       objectionType: turn.objectionType,
+      objectionSubtype: turn.objectionSubtype ?? null,
       sentiment: turn.sentiment,
       scoreBefore: turn.scoreBefore,
       scoreAfter: turn.scoreAfter,
       stage: turn.stage,
       discountOffered: turn.discountOffered,
+      tactic: turn.tactic ?? null,
+      tacticReasoning: turn.tacticReasoning ?? null,
+      pipeline: turn.pipeline ?? null,
     },
   });
 }

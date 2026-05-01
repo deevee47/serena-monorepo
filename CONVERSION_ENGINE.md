@@ -6,6 +6,25 @@
 
 ---
 
+## Tactic attribution on every CallTurn (shipped)
+
+`CallTurn` schema gains 4 columns so every agent reply is attributable to a
+specific tactic for the eventual learning loop:
+
+| Column | Purpose |
+|---|---|
+| `tactic` | The Tactic enum value chosen for this AGENT turn (null on legacy path / USER turns) |
+| `tactic_reasoning` | One-sentence justification logged from `/decide` |
+| `objection_subtype` | The fine-grained subtype from B-2 (PRICE→`too_expensive` etc.) |
+| `pipeline` | `'tactic'` or `'legacy'` — which generation path produced this turn |
+
+Migration: [prisma/migrations/20260501000000_call_turn_tactic_attribution/](prisma/migrations/20260501000000_call_turn_tactic_attribution/migration.sql).
+Run `bunx prisma migrate deploy` (or your equivalent for Neon) to apply.
+
+`buildDecideRequest()` extracted to its own module ([services/decide-request.builder.ts](node-gateway/src/services/decide-request.builder.ts)) so it imports cleanly in unit tests without dragging the env validator through `brain.service.ts → config/env.ts`.
+
+---
+
 ## Phase B-Integration (shipped) — node-gateway uses the tactic pipeline (flag-gated)
 
 `processTranscript` in [node-gateway/src/routes/webhook.ts](node-gateway/src/routes/webhook.ts) now branches on `USE_TACTIC_PIPELINE`:

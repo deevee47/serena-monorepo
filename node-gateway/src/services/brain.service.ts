@@ -63,18 +63,10 @@ export type Tactic =
   | 'ASSUMPTIVE_CLOSE'
   | 'GRACEFUL_EXIT';
 
-export type DecideRequest = {
-  call_id: string;
-  objection_type: ObjectionType | null;
-  objection_subtype?: string | null;
-  sentiment?: 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL' | null;
-  stage: ConversationStage;
-  score: number;
-  turn_count: number;
-  prior_objection_types: ObjectionType[];
-  discounts_offered: number[];
-  has_alternative_product: boolean;
-};
+// DecideRequest lives in decide-request.builder.ts so the (pure) builder
+// module has no transitive dependency on this file (which loads env config).
+import type { DecideRequest } from './decide-request.builder.js';
+export type { DecideRequest };
 
 export type DecideResponse = {
   tactic: Tactic;
