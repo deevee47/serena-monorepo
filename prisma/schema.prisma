@@ -63,18 +63,16 @@ model CallTurn {
   scoreAfter       Int        @map("score_after")
   stage            String
   discountOffered  Int?       @map("discount_offered")
-  // Tactic attribution for the learning loop. Only populated for AGENT turns
-  // and only when the tactic pipeline (USE_TACTIC_PIPELINE=true) is on.
-  tactic           String?    @map("tactic")
-  tacticReasoning  String?    @map("tactic_reasoning")
-  // Which generation pipeline produced this AGENT turn — 'legacy' or 'tactic'.
-  pipeline         String?    @map("pipeline")
+  // Tool attribution under the converse pipeline. Only set on AGENT turns
+  // when the LLM picked a tool. Null for text-only turns and USER turns.
+  toolCalled       String?    @map("tool_called")
+  toolArgs         Json?      @map("tool_args")
   createdAt        DateTime   @default(now()) @map("created_at")
   call             Call       @relation(fields: [callId], references: [callId])
 
   @@index([callId])
   @@index([callId, turnNumber])
-  @@index([tactic])
+  @@index([toolCalled])
   @@map("call_turns")
 }
 

@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
-"""Interactive CLI: type your customer responses, see the agent reply.
+"""Interactive CLI for the converse pipeline.
 
-Runs the full conversion-engine pipeline locally without telephony, the
-node-gateway, or a database. Type a customer line at the prompt and watch:
-  - what the classifier saw (objection_type, sentiment, subtype, confidence)
-  - what tactic the rules engine picked, and why
-  - the agent's natural-language reply (real LLM call)
-  - any tool the tactic triggered (e.g. WhatsApp checkout link demo)
+Type customer responses; the agent reply (and any tool call) print live.
+Each turn runs through the same code path as the live Vapi flow:
+classifier-free converse() call → optional WhatsApp tool dispatch.
+
+No telephony, no node-gateway, no DB — just exercises the brain in-process
+so you can judge response quality fast.
 
 Commands:
-  /state           Print current session state.
-  /reset           Start a fresh session.
+  /state           Print current session snapshot.
+  /reset           Start over.
   /exit, /quit     Leave the CLI.
 
 Usage:
   cd fastapi-brain && uv run python ../scripts/interactive-cli.py
 
-Requires the .env at repo root to have OPENAI_API_KEY and PINECONE_API_KEY.
+Requires .env at repo root with OPENAI_API_KEY and PINECONE_API_KEY.
 """
+
 import asyncio
 import os
 import sys
@@ -29,29 +30,23 @@ from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
-# Force Pinecone mode in the CLI so subtype-driven rules (incl. WhatsApp
-# routing on ready_to_buy) actually fire. The default 'shadow' mode discards
-# subtypes by always returning the LLM result. Override via CLI env if you
-# want shadow / llm mode for comparison.
-os.environ.setdefault("CLASSIFIER_MODE", "pinecone")
-
 from app.models.requests import (
-    ConversationStage,
+    CartContext,
+    CartItem,
     ConversationTurn,
-    ObjectionType,
     ProductContext,
 )
-from app.services.classifier import classify_objection
-from app.services.decision import Perception, decide
-from app.services.llm import generate_response
-from app.services.signals import SignalSnapshot, filler_density, utterance_length_trend
-from app.services.speech_prompt_builder import (
-    build_speech_messages,
-    build_speech_system_prompt,
+from app.services.converse_prompt_builder import build_converse_system_prompt
+from app.services.llm import converse_response_stream
+from app.services.prompt_sections import build_chat_messages
+from app.services.tools import (
+    OPENAI_TOOLS,
+    ValidationError,
+    parse_tool_call,
 )
 
 
-# ─── Config you might tweak ───────────────────────────────────────────────────
+# ─── Hardcoded demo context ───────────────────────────────────────────────
 
 PRODUCT = ProductContext(
     product_id="prod-001",
@@ -65,87 +60,73 @@ PRODUCT = ProductContext(
     ],
 )
 
-CUSTOMER_PHONE = "+15551234567"  # for the WhatsApp demo log
+ALTERNATIVE_PRODUCT = ProductContext(
+    product_id="prod-002",
+    name="ZephyrChair Lite",
+    price=199.0,
+    description="A simpler ergonomic chair, same family at a lower price point",
+    key_features=[
+        "2-position lumbar",
+        "mesh back",
+        "2-year warranty",
+    ],
+)
 
+CART = CartContext(
+    items=[
+        CartItem(product_id="prod-001", name="ZephyrChair Pro", price=349.0),
+        CartItem(product_id="acc-mat-01", name="Anti-fatigue Floor Mat", price=49.0),
+    ],
+    total=349.0 + 49.0,
+    abandoned_minutes_ago=23,
+)
 
-# ─── Session state ────────────────────────────────────────────────────────────
+CUSTOMER_PHONE = "+15551234567"
+
 
 @dataclass
 class Session:
-    stage: ConversationStage = ConversationStage.INTRO
-    score: int = 50
-    turn_count: int = 0
-    prior_objections: list[ObjectionType] = field(default_factory=list)
-    discounts_offered: list[int] = field(default_factory=list)
     history: list[ConversationTurn] = field(default_factory=list)
-    last_tactic: str | None = None
-    last_subtype: str | None = None
+    discounts_offered: list[int] = field(default_factory=list)
+    last_tool: str | None = None
 
     def reset(self) -> None:
-        self.stage = ConversationStage.INTRO
-        self.score = 50
-        self.turn_count = 0
-        self.prior_objections = []
-        self.discounts_offered = []
-        self.history = []
-        self.last_tactic = None
-        self.last_subtype = None
+        self.history.clear()
+        self.discounts_offered.clear()
+        self.last_tool = None
 
 
-# Score deltas mirror node-gateway/scoring.service.ts defaults so the CLI
-# behaves like a real call without needing the DB-backed config.
-SCORE_DELTAS = {
-    ObjectionType.PRICE: -15,
-    ObjectionType.TRUST: -20,
-    ObjectionType.CONFUSION: -10,
-    ObjectionType.TIMING: -12,
-    ObjectionType.POSITIVE_SIGNAL: 12,
-    ObjectionType.NEUTRAL: 0,
-}
+# ─── WhatsApp demo (mirror of node-gateway/services/whatsapp.service.ts) ──
+
+def _wa_checkout_link(discount_percent: int) -> str:
+    final = PRODUCT.price * (1 - discount_percent / 100)
+    tag = f" ({discount_percent}% off)" if discount_percent else ""
+    url = f"https://shop.example/checkout/{PRODUCT.product_id}?d={discount_percent}"
+    return f"Checkout — {PRODUCT.name}{tag}: ${final:.2f} | {url}"
 
 
-def update_score(session: Session, otype: str, sentiment: str) -> int:
-    delta = SCORE_DELTAS.get(ObjectionType(otype), 0)
-    if sentiment == "POSITIVE" and delta < 0:
-        delta = max(-1, delta // 2)
-    if ObjectionType(otype) in session.prior_objections and delta < 0:
-        delta -= 10  # repeat penalty
-    return max(0, min(100, session.score + delta))
+def _wa_product_info() -> str:
+    url = f"https://shop.example/product/{PRODUCT.product_id}"
+    return f"{PRODUCT.name} — ${PRODUCT.price:.2f} | Details: {url} | Reach out anytime."
 
 
-def advance_stage(session: Session, otype: str, sentiment: str) -> ConversationStage:
-    """Tiny FSM mirroring node-gateway/stage.service.ts in spirit (not byte-for-byte)."""
-    if session.score < 20 and session.turn_count >= 3:
-        return ConversationStage.END
-    if sentiment == "POSITIVE" and session.score >= 60 and session.turn_count >= 4:
-        return ConversationStage.CLOSE
-    if otype in {"PRICE"} and session.stage in {ConversationStage.PITCH, ConversationStage.OBJECTION}:
-        return ConversationStage.NEGOTIATION
-    if otype in {"TRUST", "TIMING", "CONFUSION"} and session.stage == ConversationStage.PITCH:
-        return ConversationStage.OBJECTION
-    if session.stage == ConversationStage.INTRO and session.turn_count > 0:
-        return ConversationStage.PITCH
-    return session.stage
+def _clamp_discount(raw) -> int:
+    n = int(raw) if isinstance(raw, (int, float)) else 0
+    return max(0, min(10, n))
 
 
-def recent_user_utterances(session: Session, current: str) -> list[str]:
-    user = [t.utterance for t in session.history if t.speaker == "USER"]
-    return (user + [current])[-5:]
+def dispatch_tool(name: str, args: dict) -> tuple[str, dict] | None:
+    """Mirror the node-gateway converse-dispatcher for the CLI demo. Returns
+    (preview_string, applied_args) or None if the tool was skipped."""
+    if name == "send_whatsapp_checkout_link":
+        applied = {"discount_percent": _clamp_discount(args.get("discount_percent", 0))}
+        return _wa_checkout_link(applied["discount_percent"]), applied
+    if name == "send_whatsapp_product_info":
+        return _wa_product_info(), {}
+    return None
 
 
-def simulate_whatsapp(tactic: str, discount: int) -> str:
-    if tactic == "SEND_CHECKOUT_LINK_WHATSAPP":
-        final = PRODUCT.price * (1 - discount / 100)
-        tag = f" ({discount}% off)" if discount else ""
-        url = f"https://shop.example/checkout/{PRODUCT.product_id}?d={discount}"
-        return f"[DEMO whatsapp → {CUSTOMER_PHONE}] Checkout — {PRODUCT.name}{tag}: ${final:.2f} | {url}"
-    if tactic == "SEND_PRODUCT_INFO_WHATSAPP":
-        url = f"https://shop.example/product/{PRODUCT.product_id}"
-        return f"[DEMO whatsapp → {CUSTOMER_PHONE}] {PRODUCT.name} — ${PRODUCT.price:.2f} | Details: {url} | Reach out anytime."
-    return ""
-
-
-# ─── Pretty-printing helpers ─────────────────────────────────────────────────
+# ─── ANSI colors ──────────────────────────────────────────────────────────
 
 C_DIM = "\033[2m"
 C_GREEN = "\033[32m"
@@ -157,88 +138,84 @@ C_END = "\033[0m"
 
 
 def banner() -> None:
-    print(f"\n{C_BOLD}═══ Serena interactive CLI ═══{C_END}")
+    print(f"\n{C_BOLD}═══ Serena interactive CLI (converse pipeline) ═══{C_END}")
     print(f"  Product: {PRODUCT.name} (${PRODUCT.price:.2f})")
-    print(f"  Phone:   {CUSTOMER_PHONE} (whatsapp_available=True)")
-    print(f"{C_DIM}  Type customer responses; agent replies in real time. /exit, /reset, /state.{C_END}\n")
-
-
-# ─── Main loop ───────────────────────────────────────────────────────────────
-
-async def turn(session: Session, utterance: str) -> None:
-    classification = await classify_objection(utterance, str(session.stage), session.score, "cli")
-    print(
-        f"  {C_DIM}classifier:{C_END} {classification.objection_type} {classification.sentiment} "
-        f"subtype={classification.subtype or '-'} conf={classification.confidence:.2f}"
-    )
-
-    new_score = update_score(session, classification.objection_type, classification.sentiment)
-    next_stage = advance_stage(session, classification.objection_type, classification.sentiment)
-
-    user_utts = recent_user_utterances(session, utterance)
-    perception = Perception(
-        objection_type=ObjectionType(classification.objection_type),
-        objection_subtype=classification.subtype,
-        sentiment=classification.sentiment,
-        stage=next_stage,
-        score=new_score,
-        turn_count=session.turn_count,
-        prior_objection_types=list(session.prior_objections),
-        discounts_offered=list(session.discounts_offered),
-        has_alternative_product=False,
-        signals=SignalSnapshot(
-            utterance_length_trend=utterance_length_trend(user_utts),
-            filler_density=filler_density(user_utts),
-        ),
-        whatsapp_available=True,
-    )
-    decision = decide(perception)
-    print(f"  {C_DIM}decide:{C_END}     {C_YELLOW}{decision.tactic.value}{C_END} — {decision.reasoning}")
-
-    # Discount authority is gated on the tactic, not just session state.
-    # Only the tactics that actually use a discount this turn get authority;
-    # everything else gets 0 so the LLM can't hallucinate a price cut.
-    discount_available = 0
-    ladder = [5, 10]
-    if decision.tactic.value == "CONCESSION_REAL" and len(session.discounts_offered) < len(ladder):
-        discount_available = ladder[len(session.discounts_offered)]
-    elif decision.tactic.value == "SEND_CHECKOUT_LINK_WHATSAPP":
-        # Reflect the highest discount already offered on the checkout link.
-        discount_available = max(session.discounts_offered) if session.discounts_offered else 0
-
-    system_prompt = build_speech_system_prompt(
-        tactic=decision.tactic.value,
-        micro_guidance=decision.micro_guidance,
-        product_context=PRODUCT,
-        discount_available=discount_available,
-    )
-    messages = build_speech_messages(utterance=utterance, conversation_history=session.history)
-    reply = (await generate_response(system_prompt, messages, "cli")).strip()
-    print(f"  {C_GREEN}agent →{C_END} {reply}")
-
-    wa_log = simulate_whatsapp(decision.tactic.value, discount_available)
-    if wa_log:
-        print(f"  {C_CYAN}{wa_log}{C_END}")
-
-    # Update session state for the next turn.
-    session.history.append(ConversationTurn(speaker="USER", utterance=utterance, timestamp=""))
-    session.history.append(ConversationTurn(speaker="AGENT", utterance=reply, timestamp=""))
-    session.prior_objections.append(ObjectionType(classification.objection_type))
-    session.score = new_score
-    session.stage = next_stage
-    session.turn_count += 1
-    session.last_tactic = decision.tactic.value
-    session.last_subtype = classification.subtype
-    # Only CONCESSION_REAL adds a NEW tier to the ladder. The WhatsApp tactic
-    # just packages whatever discount was already offered into the link.
-    if discount_available and decision.tactic.value == "CONCESSION_REAL":
-        session.discounts_offered.append(discount_available)
+    print(f"  Alt:     {ALTERNATIVE_PRODUCT.name} (${ALTERNATIVE_PRODUCT.price:.2f})")
+    print(f"  Cart:    {len(CART.items)} items, ${CART.total:.2f}, abandoned ~{CART.abandoned_minutes_ago} min ago")
+    for item in CART.items:
+        print(f"    - {item.name} (${item.price:.2f})")
+    print(f"  Phone:   {CUSTOMER_PHONE} (whatsapp_available)")
+    print(f"{C_DIM}  Type customer responses; agent replies stream live. /exit /reset /state{C_END}\n")
 
 
 def print_state(session: Session) -> None:
-    print(f"  {C_DIM}stage={session.stage} score={session.score} turn={session.turn_count} "
-          f"discounts={session.discounts_offered} prior_objs={[o.value for o in session.prior_objections]} "
-          f"last_tactic={session.last_tactic}{C_END}")
+    print(
+        f"  {C_DIM}turns={len(session.history) // 2} "
+        f"discounts_offered={session.discounts_offered} "
+        f"last_tool={session.last_tool}{C_END}"
+    )
+
+
+# ─── Per-turn pipeline ────────────────────────────────────────────────────
+
+async def turn(session: Session, utterance: str) -> None:
+    system_prompt = build_converse_system_prompt(
+        product_context=PRODUCT,
+        alternative_product_context=ALTERNATIVE_PRODUCT,
+        cart_context=CART,
+        discounts_already_offered=session.discounts_offered,
+    )
+    messages = build_chat_messages(utterance=utterance, conversation_history=session.history)
+
+    print(f"  {C_GREEN}agent →{C_END} ", end="", flush=True)
+
+    text_chunks: list[str] = []
+    pending_tool: dict | None = None
+    finish_reason: str | None = None
+
+    async for event in converse_response_stream(system_prompt, messages, OPENAI_TOOLS, "cli"):
+        kind = event["type"]
+        if kind == "text":
+            delta = event["delta"]
+            text_chunks.append(delta)
+            print(delta, end="", flush=True)
+        elif kind == "tool_call":
+            pending_tool = {"name": event["name"], "args": event["args"]}
+        elif kind == "done":
+            finish_reason = event.get("finish_reason")
+    print()  # newline after streaming text
+
+    full_text = "".join(text_chunks).strip()
+
+    # Validate any tool the LLM picked
+    applied_tool: tuple[str, dict] | None = None
+    if pending_tool:
+        try:
+            validated = parse_tool_call(pending_tool["name"], pending_tool["args"])
+            applied_tool = (validated.name, validated.args)
+        except (ValidationError, ValueError) as exc:
+            print(f"  {C_RED}tool dropped (invalid):{C_END} {pending_tool['name']} {pending_tool['args']} — {exc}")
+
+    if applied_tool:
+        name, args = applied_tool
+        dispatch = dispatch_tool(name, args)
+        if dispatch:
+            preview, applied_args = dispatch
+            arg_str = ", ".join(f"{k}={v}" for k, v in applied_args.items())
+            print(f"  {C_YELLOW}tool   →{C_END} {name}({arg_str})")
+            print(f"  {C_CYAN}[DEMO whatsapp → {CUSTOMER_PHONE}] {preview}{C_END}")
+            session.last_tool = name
+            # Track checkout-link discount so the next prompt skips that tier.
+            if name == "send_whatsapp_checkout_link":
+                d = applied_args.get("discount_percent", 0)
+                if d > 0 and d not in session.discounts_offered:
+                    session.discounts_offered.append(d)
+
+    if finish_reason and finish_reason not in ("stop", "tool_calls"):
+        print(f"  {C_DIM}finish_reason={finish_reason}{C_END}")
+
+    session.history.append(ConversationTurn(speaker="USER", utterance=utterance, timestamp=""))
+    session.history.append(ConversationTurn(speaker="AGENT", utterance=full_text, timestamp=""))
 
 
 async def main() -> None:
