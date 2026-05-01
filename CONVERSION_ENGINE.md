@@ -6,6 +6,30 @@
 
 ---
 
+## Phase B-Integration (shipped) — node-gateway uses the tactic pipeline (flag-gated)
+
+`processTranscript` in [node-gateway/src/routes/webhook.ts](node-gateway/src/routes/webhook.ts) now branches on `USE_TACTIC_PIPELINE`:
+
+- **`false` (default):** legacy path — classify → `/generate` (4000-token persona prompt). Zero behavior change from before this PR.
+- **`true`:** new path — classify → `/decide` → `/generate-tactic` (~500-token tactic-driven prompt).
+
+Both paths still stream the response and fire Vapi `/say` on the first chunk for low TTFW.
+
+**New brain.service.ts client functions:**
+- `decide(req)` with Opossum circuit breaker (5s timeout); fallback returns `ASK_OPEN` with safe micro-guidance so the call doesn't drop on a brain outage.
+- `generateTactic(req)` and `generateTacticStream(req, onChunk)` (12s/15s timeouts); fallback returns "Give me just a moment."
+
+**`buildDecideRequest()`** in webhook.ts is exported and unit-tested. Maps live `CallSession` state (prior objections, discounts ladder, alternative-product availability, score, stage, turn count) plus the latest classification into the `DecideRequest` wire shape.
+
+**Rollout:**
+1. Deploy with `USE_TACTIC_PIPELINE=false` (default) — code lands but nothing changes.
+2. Flip to `true` in staging or a single tenant — watch `pipeline=tactic` logs and conversion outcomes.
+3. Flip globally once confident. Rollback = single env change.
+
+185 tests pass total (93 brain + 92 gateway). TypeScript clean.
+
+---
+
 ## Phase B-4 (shipped) — Tactic-driven Speech layer
 
 Replaces the 4000-token monolithic persona prompt with a small focused prompt

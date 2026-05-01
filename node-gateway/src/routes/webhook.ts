@@ -17,8 +17,11 @@ import {
 import {
   classifyObjection,
   generateResponseStream,
+  decide as decideTactic,
+  generateTacticStream,
   FALLBACK_RESPONSES,
   type BrainConversationTurn,
+  type DecideRequest,
 } from '../services/brain.service.js';
 import { calculateScoreAfterTurn } from '../services/scoring.service.js';
 import { getNextStage } from '../services/stage.service.js';
@@ -44,6 +47,36 @@ interface RequestWithRawBody extends FastifyRequest {
 // Per-call concurrency lock — chains processTranscript without blocking the HTTP response
 const callLocks = new Map<string, Promise<void>>();
 
+// Build the DecideRequest payload from live session state + the latest
+// classification. Pure function — exported so it can be unit-tested.
+export function buildDecideRequest(args: {
+  callId: string;
+  classification: {
+    objection_type: (typeof ObjectionType)[keyof typeof ObjectionType];
+    sentiment: 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL';
+    subtype?: string | null;
+  };
+  stage: ConversationStage;
+  score: number;
+  turnCount: number;
+  priorObjections: (typeof ObjectionType)[keyof typeof ObjectionType][];
+  discountsOffered: number[];
+  hasAlternativeProduct: boolean;
+}): DecideRequest {
+  return {
+    call_id: args.callId,
+    objection_type: args.classification.objection_type,
+    objection_subtype: args.classification.subtype ?? null,
+    sentiment: args.classification.sentiment,
+    stage: args.stage,
+    score: args.score,
+    turn_count: args.turnCount,
+    prior_objection_types: args.priorObjections,
+    discounts_offered: args.discountsOffered,
+    has_alternative_product: args.hasAlternativeProduct,
+  };
+}
+
 async function processTranscript(callId: string, utterance: string): Promise<void> {
   const log = createCallLogger(callId);
 
@@ -56,7 +89,7 @@ async function processTranscript(callId: string, utterance: string): Promise<voi
   }
 
   // Classify utterance
-  let classify: { objection_type: (typeof ObjectionType)[keyof typeof ObjectionType]; sentiment: 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL'; confidence: number };
+  let classify: { objection_type: (typeof ObjectionType)[keyof typeof ObjectionType]; sentiment: 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL'; confidence: number; subtype?: string | null };
   try {
     classify = await classifyObjection({
       call_id: callId,
@@ -66,7 +99,7 @@ async function processTranscript(callId: string, utterance: string): Promise<voi
     });
   } catch (err) {
     log.error({ err }, 'classifyObjection threw — using neutral fallback');
-    classify = { objection_type: ObjectionType.NEUTRAL, sentiment: 'NEUTRAL', confidence: 0 };
+    classify = { objection_type: ObjectionType.NEUTRAL, sentiment: 'NEUTRAL', confidence: 0, subtype: null };
   }
 
   const newScore = calculateScoreAfterTurn(session, classify.objection_type, classify.sentiment);
@@ -123,31 +156,71 @@ async function processTranscript(callId: string, utterance: string): Promise<voi
   }));
 
   let vapiSayFired = false;
-  const generatedText = await generateResponseStream(
-    {
-      call_id: callId,
-      utterance,
+  const fireVapiSayOnFirstChunk = (chunk: string) => {
+    if (!vapiSayFired) {
+      vapiSayFired = true;
+      got
+        .post(`https://api.vapi.ai/call/${callId}/say`, {
+          headers: { Authorization: `Bearer ${config.VAPI_API_KEY}` },
+          json: { message: chunk },
+        })
+        .catch((err) => log.error({ err }, 'Vapi say (first chunk) failed'));
+    }
+  };
+
+  let generatedText: string;
+  let chosenTactic: string | null = null;
+
+  if (config.USE_TACTIC_PIPELINE) {
+    // New pipeline: classify → decide → generate-tactic
+    const decideReq = buildDecideRequest({
+      callId,
+      classification: classify,
       stage: nextStage,
       score: newScore,
-      discount_available: discountAmount,
-      objection_type: classify.objection_type,
-      conversation_history: history,
-      product_context: productContext,
-      alternative_product_context: alternativeProductContext,
-    },
-    (chunk) => {
-      // Fire Vapi /say on the first chunk for fast time-to-first-word
-      if (!vapiSayFired) {
-        vapiSayFired = true;
-        got
-          .post(`https://api.vapi.ai/call/${callId}/say`, {
-            headers: { Authorization: `Bearer ${config.VAPI_API_KEY}` },
-            json: { message: chunk },
-          })
-          .catch((err) => log.error({ err }, 'Vapi say (first chunk) failed'));
-      }
-    },
-  );
+      turnCount: currentSession.turnCount,
+      priorObjections: session.objectionsEncountered, // pre-this-turn history
+      discountsOffered: currentSession.discountsOffered,
+      hasAlternativeProduct: alternativeProductContext !== null,
+    });
+
+    const decision = await decideTactic(decideReq);
+    chosenTactic = decision.tactic;
+    log.info(
+      { tactic: decision.tactic, reasoning: decision.reasoning },
+      'Decision made',
+    );
+
+    generatedText = await generateTacticStream(
+      {
+        call_id: callId,
+        utterance,
+        tactic: decision.tactic,
+        micro_guidance: decision.micro_guidance,
+        conversation_history: history,
+        product_context: productContext,
+        alternative_product_context: alternativeProductContext,
+        discount_available: discountAmount,
+      },
+      fireVapiSayOnFirstChunk,
+    );
+  } else {
+    // Legacy pipeline: classify → generate (persona prompt)
+    generatedText = await generateResponseStream(
+      {
+        call_id: callId,
+        utterance,
+        stage: nextStage,
+        score: newScore,
+        discount_available: discountAmount,
+        objection_type: classify.objection_type,
+        conversation_history: history,
+        product_context: productContext,
+        alternative_product_context: alternativeProductContext,
+      },
+      fireVapiSayOnFirstChunk,
+    );
+  }
 
   await updateSession(callId, stageUpdates);
 
@@ -174,7 +247,15 @@ async function processTranscript(callId: string, utterance: string): Promise<voi
   }).catch((err) => log.error({ err }, 'DB turn insert failed (agent)'));
 
   log.info(
-    { stage: nextStage, score: newScore, objection: classify.objection_type, discount: discountAmount || undefined },
+    {
+      stage: nextStage,
+      score: newScore,
+      objection: classify.objection_type,
+      subtype: classify.subtype ?? undefined,
+      discount: discountAmount || undefined,
+      tactic: chosenTactic ?? undefined,
+      pipeline: config.USE_TACTIC_PIPELINE ? 'tactic' : 'legacy',
+    },
     'Turn processed',
   );
 }
