@@ -359,6 +359,15 @@ def check_heuristics(scenario: dict, turns: list[TurnResult], last_side_effect: 
             detail=f"needles={needles}, last_text=...{last_text[-120:]}",
         ))
 
+    if "expected_text_contains_all" in scenario:
+        needles = [n.lower() for n in scenario["expected_text_contains_all"]]
+        missing = [n for n in needles if n not in all_text]
+        results.append(HeuristicResult(
+            name="contains_all",
+            passed=not missing,
+            detail=f"missing={missing}" if missing else "ok",
+        ))
+
     if "expected_text_not_contains_any" in scenario:
         forbidden = [n.lower() for n in scenario["expected_text_not_contains_any"]]
         violations = [n for n in forbidden if n in all_text]
