@@ -71,3 +71,42 @@ export interface GenerateResponseRequest {
 export interface GenerateResponseResponse {
   text: string;
 }
+
+// ─── Decision layer ───────────────────────────────────────────────────────
+// Pick the next conversational tactic given the latest perception of the
+// customer. Pure rules engine — no LLM, no I/O. Inspectable per turn so
+// outcomes can be attributed to specific tactics.
+
+export type Tactic =
+  | 'ASK_OPEN'
+  | 'ASK_DISQUALIFY'
+  | 'MIRROR'
+  | 'ISOLATE'
+  | 'REFRAME'
+  | 'CONCESSION_REAL'
+  | 'CONCESSION_NON_MONETARY'
+  | 'ALTERNATIVE_PIVOT'
+  | 'PERMISSION_PUSH'
+  | 'TIME_CAPTURE'
+  | 'TRIAL_CLOSE'
+  | 'ASSUMPTIVE_CLOSE'
+  | 'GRACEFUL_EXIT';
+
+export interface DecideRequest {
+  call_id: string;
+  objection_type: ObjectionType | null;
+  objection_subtype?: string | null;
+  sentiment?: 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL' | null;
+  stage: ConversationStage;
+  score: number;
+  turn_count: number;
+  prior_objection_types: ObjectionType[]; // full session history, not just last 4
+  discounts_offered: number[]; // e.g. [] | [5] | [5, 10]
+  has_alternative_product: boolean;
+}
+
+export interface DecideResponse {
+  tactic: Tactic;
+  reasoning: string; // one-sentence justification for log attribution
+  micro_guidance: string; // 3-5 lines for the speech-layer prompt
+}
