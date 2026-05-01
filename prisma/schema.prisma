@@ -51,22 +51,30 @@ model Call {
 }
 
 model CallTurn {
-  id              String     @id @default(uuid())
-  callId          String     @map("call_id")
-  turnNumber      Int        @map("turn_number")
-  speaker         Speaker
-  utterance       String
-  objectionType   String?    @map("objection_type")
-  sentiment       Sentiment?
-  scoreBefore     Int        @map("score_before")
-  scoreAfter      Int        @map("score_after")
-  stage           String
-  discountOffered Int?       @map("discount_offered")
-  createdAt       DateTime   @default(now()) @map("created_at")
-  call            Call       @relation(fields: [callId], references: [callId])
+  id               String     @id @default(uuid())
+  callId           String     @map("call_id")
+  turnNumber       Int        @map("turn_number")
+  speaker          Speaker
+  utterance        String
+  objectionType    String?    @map("objection_type")
+  objectionSubtype String?    @map("objection_subtype") // e.g. PRICE -> 'too_expensive', 'found_cheaper'
+  sentiment        Sentiment?
+  scoreBefore      Int        @map("score_before")
+  scoreAfter       Int        @map("score_after")
+  stage            String
+  discountOffered  Int?       @map("discount_offered")
+  // Tactic attribution for the learning loop. Only populated for AGENT turns
+  // and only when the tactic pipeline (USE_TACTIC_PIPELINE=true) is on.
+  tactic           String?    @map("tactic")
+  tacticReasoning  String?    @map("tactic_reasoning")
+  // Which generation pipeline produced this AGENT turn — 'legacy' or 'tactic'.
+  pipeline         String?    @map("pipeline")
+  createdAt        DateTime   @default(now()) @map("created_at")
+  call             Call       @relation(fields: [callId], references: [callId])
 
   @@index([callId])
   @@index([callId, turnNumber])
+  @@index([tactic])
   @@map("call_turns")
 }
 

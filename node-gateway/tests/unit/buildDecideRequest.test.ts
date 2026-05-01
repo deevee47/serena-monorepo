@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { buildDecideRequest } from '../../src/routes/webhook.js';
+import { buildDecideRequest } from '../../src/services/decide-request.builder.js';
 import { ObjectionType, ConversationStage } from '../../src/types/session.types.js';
 
 describe('buildDecideRequest', () => {

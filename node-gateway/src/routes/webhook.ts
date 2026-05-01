@@ -21,7 +21,6 @@ import {
   generateTacticStream,
   FALLBACK_RESPONSES,
   type BrainConversationTurn,
-  type DecideRequest,
 } from '../services/brain.service.js';
 import { calculateScoreAfterTurn } from '../services/scoring.service.js';
 import { getNextStage } from '../services/stage.service.js';
@@ -44,38 +43,10 @@ interface RequestWithRawBody extends FastifyRequest {
   rawBody?: Buffer;
 }
 
+import { buildDecideRequest } from '../services/decide-request.builder.js';
+
 // Per-call concurrency lock — chains processTranscript without blocking the HTTP response
 const callLocks = new Map<string, Promise<void>>();
-
-// Build the DecideRequest payload from live session state + the latest
-// classification. Pure function — exported so it can be unit-tested.
-export function buildDecideRequest(args: {
-  callId: string;
-  classification: {
-    objection_type: (typeof ObjectionType)[keyof typeof ObjectionType];
-    sentiment: 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL';
-    subtype?: string | null;
-  };
-  stage: ConversationStage;
-  score: number;
-  turnCount: number;
-  priorObjections: (typeof ObjectionType)[keyof typeof ObjectionType][];
-  discountsOffered: number[];
-  hasAlternativeProduct: boolean;
-}): DecideRequest {
-  return {
-    call_id: args.callId,
-    objection_type: args.classification.objection_type,
-    objection_subtype: args.classification.subtype ?? null,
-    sentiment: args.classification.sentiment,
-    stage: args.stage,
-    score: args.score,
-    turn_count: args.turnCount,
-    prior_objection_types: args.priorObjections,
-    discounts_offered: args.discountsOffered,
-    has_alternative_product: args.hasAlternativeProduct,
-  };
-}
 
 async function processTranscript(callId: string, utterance: string): Promise<void> {
   const log = createCallLogger(callId);
@@ -170,6 +141,7 @@ async function processTranscript(callId: string, utterance: string): Promise<voi
 
   let generatedText: string;
   let chosenTactic: string | null = null;
+  let tacticReasoning: string | null = null;
 
   if (config.USE_TACTIC_PIPELINE) {
     // New pipeline: classify → decide → generate-tactic
@@ -186,6 +158,7 @@ async function processTranscript(callId: string, utterance: string): Promise<voi
 
     const decision = await decideTactic(decideReq);
     chosenTactic = decision.tactic;
+    tacticReasoning = decision.reasoning;
     log.info(
       { tactic: decision.tactic, reasoning: decision.reasoning },
       'Decision made',
@@ -230,11 +203,13 @@ async function processTranscript(callId: string, utterance: string): Promise<voi
 
   // Non-blocking DB writes
   const turnBase = { scoreBefore: session.score, scoreAfter: newScore, stage: nextStage };
+  const pipeline: 'tactic' | 'legacy' = config.USE_TACTIC_PIPELINE ? 'tactic' : 'legacy';
   insertCallTurn(callId, {
     turnNumber: session.turnCount + 1,
     speaker: 'USER',
     utterance,
     objectionType: classify.objection_type,
+    objectionSubtype: classify.subtype ?? null,
     sentiment: classify.sentiment,
     discountOffered: discountAmount || undefined,
     ...turnBase,
@@ -243,6 +218,9 @@ async function processTranscript(callId: string, utterance: string): Promise<voi
     turnNumber: session.turnCount + 2,
     speaker: 'AGENT',
     utterance: generatedText,
+    tactic: chosenTactic,
+    tacticReasoning: tacticReasoning,
+    pipeline,
     ...turnBase,
   }).catch((err) => log.error({ err }, 'DB turn insert failed (agent)'));
 
