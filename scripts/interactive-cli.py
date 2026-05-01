@@ -58,6 +58,9 @@ from app.services.tools import (
 
 
 DEFAULT_PHONE = "+15551234567"  # Sarah Chen, RETURNING — see seed-demo-data.ts
+AGENT_NAME = os.environ.get("AGENT_NAME", "Alex")
+BUSINESS_NAME = os.environ.get("BUSINESS_NAME", "ShopEase")
+OPENING_OFFER_PERCENT = int(os.environ.get("OPENING_OFFER_PERCENT", "5"))
 
 
 # ─── ANSI ─────────────────────────────────────────────────────────────────
@@ -236,6 +239,7 @@ def dispatch_side_effect_tool(
 def banner(customer: CustomerContext, cart: CartContext | None,
            product: ProductContext | None, alt: ProductContext | None) -> None:
     print(f"\n{C_BOLD}═══ Serena interactive CLI (converse pipeline) ═══{C_END}")
+    print(f"  Agent:    {AGENT_NAME} from {BUSINESS_NAME} (opening offer {OPENING_OFFER_PERCENT}%, cap 10%)")
     print(f"  Customer: {customer.name or '(no name)'} ({customer.phone})")
     print(f"            segment={customer.segment.value} ltv=${customer.lifetime_value:.2f} "
           f"timezone={customer.timezone or '?'} prefer={customer.preferred_contact or '?'}")
@@ -249,7 +253,8 @@ def banner(customer: CustomerContext, cart: CartContext | None,
             print(f"    - {item.name} (${item.price:.2f})")
     if alt:
         print(f"  Alt:  {alt.name} (${alt.price:.2f})")
-    print(f"{C_DIM}  Type customer responses; agent streams live. /exit /reset /switch <phone> /list /state{C_END}\n")
+    print(f"{C_DIM}  Tip: type 'hello' or anything to start — agent will open with intro + cart + offer.{C_END}")
+    print(f"{C_DIM}  /exit /reset /switch <phone> /list /state{C_END}\n")
 
 
 async def list_customers(db: Prisma) -> None:
@@ -278,6 +283,9 @@ async def turn(
         cart_context=cart,
         customer_context=customer,
         discounts_already_offered=session.discounts_offered,
+        agent_name=AGENT_NAME,
+        business_name=BUSINESS_NAME,
+        opening_offer_percent=OPENING_OFFER_PERCENT,
     )
     messages = build_chat_messages(utterance=utterance, conversation_history=session.history)
 
