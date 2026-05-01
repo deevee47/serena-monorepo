@@ -1,13 +1,22 @@
 """OpenAI tool definitions exposed to the agent LLM.
 
-Two tools for v1:
-  - send_whatsapp_checkout_link: real side effect (sends WhatsApp checkout link)
-  - send_whatsapp_product_info: real side effect (sends WhatsApp product info)
+Two categories:
 
-Pydantic models double as the JSON schemas the LLM sees. The integer bound on
-discount_percent is the contract — modern models almost never violate it.
-The /converse route validates parsed args against these models and rejects
-or coerces invalid calls; the gateway clamps as a final belt-and-suspenders.
+1. **Side-effect tools** (return None to the LLM, dispatched by gateway):
+     - send_whatsapp_checkout_link  — fires real WhatsApp send
+     - send_whatsapp_product_info   — fires real WhatsApp send
+   These end the LLM's turn. The agent says one confirmation sentence and
+   then calls the tool; the gateway handles the actual side effect.
+
+2. **Observation tools** (return real data to the LLM, executed server-side):
+     - check_inventory       — real stock count + restock ETA
+     - get_recent_purchases  — real purchase count over a window
+     - get_review_summary    — real review count + avg + sample quote
+     - get_delivery_eta      — delivery days for a zip code
+   The brain runs these inline; the model gets the result back as a tool
+   message and continues generating with grounded facts.
+
+Pydantic models double as the JSON schemas the LLM sees.
 """
 
 from typing import Any, Literal
@@ -16,6 +25,9 @@ from pydantic import BaseModel, Field, ValidationError
 
 # Keep in sync with prompt_sections.MAX_DISCOUNT.
 MAX_DISCOUNT_PERCENT = 10
+
+
+# ─── Side-effect tool args ────────────────────────────────────────────────
 
 
 class SendCheckoutLinkArgs(BaseModel):
@@ -35,14 +47,59 @@ class SendProductInfoArgs(BaseModel):
     pass
 
 
-# Tool name → its Pydantic args model. Used at parse time to validate the
-# args returned by the model.
+# ─── Observation tool args ────────────────────────────────────────────────
+
+
+class CheckInventoryArgs(BaseModel):
+    product_id: str = Field(description="The product_id to check (must match PRODUCT FACTS / ALTERNATIVE PRODUCT).")
+
+
+class GetRecentPurchasesArgs(BaseModel):
+    product_id: str = Field(description="The product_id to count purchases for.")
+    days: int = Field(default=30, ge=1, le=365, description="Look-back window in days. Default 30.")
+
+
+class GetReviewSummaryArgs(BaseModel):
+    product_id: str = Field(description="The product_id to summarize reviews for.")
+
+
+class GetDeliveryEtaArgs(BaseModel):
+    zip_code: str = Field(min_length=5, max_length=10, description="US ZIP code (5 digits, optionally ZIP+4).")
+    product_id: str = Field(description="The product_id (delivery time can vary by warehouse).")
+
+
+# Tool name → its Pydantic args model.
 TOOL_ARG_MODELS: dict[str, type[BaseModel]] = {
     "send_whatsapp_checkout_link": SendCheckoutLinkArgs,
     "send_whatsapp_product_info": SendProductInfoArgs,
+    "check_inventory": CheckInventoryArgs,
+    "get_recent_purchases": GetRecentPurchasesArgs,
+    "get_review_summary": GetReviewSummaryArgs,
+    "get_delivery_eta": GetDeliveryEtaArgs,
 }
 
-ToolName = Literal["send_whatsapp_checkout_link", "send_whatsapp_product_info"]
+ToolName = Literal[
+    "send_whatsapp_checkout_link",
+    "send_whatsapp_product_info",
+    "check_inventory",
+    "get_recent_purchases",
+    "get_review_summary",
+    "get_delivery_eta",
+]
+
+# Side-effect tools end the LLM turn — gateway dispatches, no result back.
+SIDE_EFFECT_TOOLS: set[str] = {
+    "send_whatsapp_checkout_link",
+    "send_whatsapp_product_info",
+}
+
+# Observation tools are executed server-side; result is fed back to the LLM.
+OBSERVATION_TOOLS: set[str] = {
+    "check_inventory",
+    "get_recent_purchases",
+    "get_review_summary",
+    "get_delivery_eta",
+}
 
 
 # OpenAI Chat Completions API "tools" payload.
@@ -77,6 +134,62 @@ OPENAI_TOOLS: list[dict[str, Any]] = [
             "parameters": SendProductInfoArgs.model_json_schema(),
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_inventory",
+            "description": (
+                "Check real, current inventory for a product. Returns "
+                "{ in_stock: int, low_stock: bool, restock_eta_days: int | null }. "
+                "Use this when honest scarcity would persuade — e.g. a hesitating "
+                "customer asking 'how many are left?' or when you want to mention "
+                "low stock as a real fact (NOT as fake urgency). Do NOT mention "
+                "stock numbers unless this tool returns them."
+            ),
+            "parameters": CheckInventoryArgs.model_json_schema(),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_recent_purchases",
+            "description": (
+                "Count how many of this product were purchased in the last N days. "
+                "Returns { count: int, days: int }. Use this for HONEST social "
+                "proof — 'we've shipped 47 of these in the last 30 days' — only "
+                "when the count is high enough to actually persuade. Do NOT "
+                "fabricate or round up the number."
+            ),
+            "parameters": GetRecentPurchasesArgs.model_json_schema(),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_review_summary",
+            "description": (
+                "Get a real summary of customer reviews. Returns { count: int, "
+                "avg_rating: float, top_positive_quote: str | null, "
+                "top_critical_quote: str | null }. Use when the customer asks "
+                "about quality, doubts the product, or wants to know what others "
+                "think. Quote reviewers verbatim — do NOT paraphrase or invent."
+            ),
+            "parameters": GetReviewSummaryArgs.model_json_schema(),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_delivery_eta",
+            "description": (
+                "Get the real delivery ETA for a product to a ZIP code. Returns "
+                "{ standard_days: int, expedited_days: int }. Use when the "
+                "customer asks about shipping or when a fast delivery is a "
+                "closing lever (e.g. they need it before a date)."
+            ),
+            "parameters": GetDeliveryEtaArgs.model_json_schema(),
+        },
+    },
 ]
 
 
@@ -100,14 +213,26 @@ def parse_tool_call(name: str, raw_args: dict[str, Any]) -> ParsedToolCall:
     return ParsedToolCall(name=name, args=validated.model_dump())  # type: ignore[arg-type]
 
 
+def is_observation_tool(name: str) -> bool:
+    return name in OBSERVATION_TOOLS
+
+
+def is_side_effect_tool(name: str) -> bool:
+    return name in SIDE_EFFECT_TOOLS
+
+
 __all__ = [
     "MAX_DISCOUNT_PERCENT",
+    "OBSERVATION_TOOLS",
     "OPENAI_TOOLS",
     "ParsedToolCall",
+    "SIDE_EFFECT_TOOLS",
     "SendCheckoutLinkArgs",
     "SendProductInfoArgs",
     "ToolName",
     "TOOL_ARG_MODELS",
-    "parse_tool_call",
     "ValidationError",
+    "is_observation_tool",
+    "is_side_effect_tool",
+    "parse_tool_call",
 ]

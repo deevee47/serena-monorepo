@@ -96,14 +96,41 @@ classify-analytics queue/worker, and tests.
 ### Type-and-talk (recommended for testing response quality)
 
 ```bash
+# Seed the demo data first (idempotent — safe to re-run)
+bun run scripts/seed-demo-data.ts
+
+# Start chatting (defaults to Sarah Chen, +15551234567)
 cd fastapi-brain && uv run python ../scripts/interactive-cli.py
+
+# Or pick a specific demo customer
+uv run python ../scripts/interactive-cli.py +15552223333
 ```
 
-In-process call to the same `converse_response_stream` the live `/converse`
-uses. No telephony, no gateway, no DB. Streams the agent's reply live; on
-tool calls prints the WhatsApp demo log.
+Loads the customer profile (segment, LTV, past orders) and abandoned cart
+from the seeded DB, then drops you into a chat with the agent. Each turn:
+real LLM call with observation tools that hit the DB live (real reviews,
+real inventory, real recent purchases).
 
-Commands inside: `/state`, `/reset`, `/exit`.
+Commands inside: `/list`, `/switch <phone>`, `/state`, `/reset`, `/exit`.
+
+### Eval suite
+
+15 canonical scenarios with two layers of scoring (heuristic invariants +
+LLM judge). Run on prompt changes to catch regressions:
+
+```bash
+cd fastapi-brain && uv run python ../scripts/run-eval.py
+
+# or just one scenario
+uv run python ../scripts/run-eval.py --scenario trust_objection_uses_reviews
+
+# skip the LLM judge for faster iteration
+uv run python ../scripts/run-eval.py --no-judge
+```
+
+Output: per-scenario JSON in `eval-results/eval-{timestamp}.json`, summary
+table to stdout. Baseline at the time of the converse-pipeline ship:
+**14/15 heuristics pass (93%), judge avg 3.67/5**.
 
 ### Full stack (only needed for real Vapi calls)
 
@@ -134,10 +161,30 @@ cd node-gateway && bun test --env-file=../.env tests/unit/
 
 ## Tools the LLM can call
 
-| Tool | Purpose | Side effect |
+Two categories. Side-effect tools end the turn; the gateway dispatches them
+asynchronously. Observation tools execute server-side and feed results back
+to the LLM via a multi-turn loop, so the next response is grounded in real
+data.
+
+**Side-effect tools** (gateway-dispatched):
+
+| Tool | When | What it does |
 |---|---|---|
-| `send_whatsapp_checkout_link(discount_percent: 0-10)` | Customer agreed / asking logistics | Demo logs a structured WhatsApp event with the checkout URL and discount-applied price |
+| `send_whatsapp_checkout_link(discount_percent: 0-10)` | Customer agreed / asking logistics | Demo logs the checkout URL with discount applied |
 | `send_whatsapp_product_info()` | Graceful exit with usable trail | Demo logs the product details URL |
+
+**Observation tools** (server-side, fed back into the model):
+
+| Tool | When | Returns |
+|---|---|---|
+| `check_inventory(product_id)` | Honest scarcity, "how many left?" | `{in_stock, low_stock, restock_eta_days}` |
+| `get_recent_purchases(product_id, days)` | Honest social proof | `{count, days}` |
+| `get_review_summary(product_id)` | "Is it any good?" / quality concern | `{count, avg_rating, top_positive_quote, top_critical_quote}` |
+| `get_delivery_eta(zip_code, product_id)` | Shipping lever / "how soon?" | `{standard_days, expedited_days}` |
+
+The brain runs observation tools inline (Prisma queries against the seeded
+DB), then re-streams from OpenAI with the tool result appended to the
+conversation. The model emits text grounded in real facts — no fabrication.
 
 To make them real: swap `simulateSend` in `whatsapp.service.ts` for a fetch
 to the WhatsApp Business API or a Twilio/MessageBird wrapper. The function
