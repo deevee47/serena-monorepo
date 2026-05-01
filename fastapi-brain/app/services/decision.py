@@ -59,8 +59,17 @@ HIGH_FILLER_DENSITY = 0.15  # fraction of tokens that are fillers
 
 
 def decide(p: Perception) -> Decision:
+    # If the customer is *still actively negotiating price* and we haven't
+    # spent the discount ladder yet, the hard exits below should defer —
+    # the whole point of having a ladder is to use it before giving up.
+    can_still_negotiate_price = (
+        p.objection_type == ObjectionType.PRICE
+        and ObjectionType.PRICE in p.prior_objection_types
+        and len(p.discounts_offered) < 2
+    )
+
     # 1. Hard exits ---------------------------------------------------------
-    if p.stage == ConversationStage.END:
+    if p.stage == ConversationStage.END and not can_still_negotiate_price:
         # Upgrade graceful exits to a real action when we can — leave a usable
         # trail (product info on WhatsApp) instead of just a verbal goodbye.
         if p.whatsapp_available and p.score >= 25:
@@ -70,7 +79,7 @@ def decide(p: Perception) -> Decision:
             )
         return _decision(Tactic.GRACEFUL_EXIT, "stage is END — already exiting")
 
-    if p.score < SCORE_GRACEFUL_EXIT and p.turn_count >= 3:
+    if p.score < SCORE_GRACEFUL_EXIT and p.turn_count >= 3 and not can_still_negotiate_price:
         if p.whatsapp_available and p.score >= 15:
             return _decision(
                 Tactic.SEND_PRODUCT_INFO_WHATSAPP,
@@ -81,7 +90,37 @@ def decide(p: Perception) -> Decision:
             f"score {p.score} below {SCORE_GRACEFUL_EXIT} after {p.turn_count} turns — preserve relationship over forcing close",
         )
 
-    # 2. Buying signals (close-side) ----------------------------------------
+    # 2. Confirmation after isolation --------------------------------------
+    # A bare positive signal ("yes", "yeah", "right") right after a PRICE
+    # objection is the customer confirming our ISOLATE worked — PRICE is the
+    # only blocker. Escalate the price-handling sequence rather than reset
+    # to ASK_OPEN as if no context exists.
+    prior_price_count = p.prior_objection_types.count(ObjectionType.PRICE)
+    discounts_count = len(p.discounts_offered)
+    if (
+        p.objection_type == ObjectionType.POSITIVE_SIGNAL
+        and not p.objection_subtype
+        and p.prior_objection_types
+        and p.prior_objection_types[-1] == ObjectionType.PRICE
+        and prior_price_count >= 1
+    ):
+        if discounts_count >= 2:
+            return _decision(
+                Tactic.PERMISSION_PUSH,
+                "PRICE isolated and confirmed but max discount given — earn permission to push back",
+            )
+        if prior_price_count >= 2:
+            tier = "first 5%" if discounts_count == 0 else "second 10% (final)"
+            return _decision(
+                Tactic.CONCESSION_REAL,
+                f"PRICE isolated and confirmed after {prior_price_count}x — concession ladder ({tier})",
+            )
+        return _decision(
+            Tactic.REFRAME,
+            "PRICE isolated and confirmed — reframe value before any concession",
+        )
+
+    # 3. Buying signals (close-side) ----------------------------------------
     if p.objection_type == ObjectionType.POSITIVE_SIGNAL:
         if p.objection_subtype in {"ready_to_buy", "asking_logistics"} or p.score >= SCORE_ASSUMPTIVE_CLOSE:
             # If we have a real close mechanism, use it instead of just verbal
@@ -111,7 +150,7 @@ def decide(p: Perception) -> Decision:
             )
         return _decision(Tactic.ASSUMPTIVE_CLOSE, "stage is CLOSE — proceed to logistics")
 
-    # 2.5 Voice-channel signal overrides (only when signals are present) ---
+    # 3.5 Voice-channel signal overrides (only when signals are present) ---
     # Engagement collapse: utterances are getting sharply shorter.
     # No clever objection handling will help — re-engage with curiosity.
     slope = p.signals.utterance_length_trend
@@ -120,8 +159,6 @@ def decide(p: Perception) -> Decision:
             Tactic.ASK_OPEN,
             f"engagement collapsing (length trend {slope:+.1f} tok/turn) — re-engage with one curious question",
         )
-
-    prior_price_count = p.prior_objection_types.count(ObjectionType.PRICE)
 
     # High hesitation marker on a first PRICE objection — they're uncertain
     # themselves; mirror so they articulate before isolating.
@@ -137,7 +174,7 @@ def decide(p: Perception) -> Decision:
             f"high hesitation (filler density {fillers:.2f}) on first PRICE — mirror before isolating",
         )
 
-    # 3. Discovery openers --------------------------------------------------
+    # 4. Discovery openers --------------------------------------------------
     if p.stage == ConversationStage.INTRO and p.turn_count <= 1:
         return _decision(Tactic.ASK_OPEN, "INTRO stage, opening turn — discover before pitching")
 
@@ -149,11 +186,10 @@ def decide(p: Perception) -> Decision:
             "low score early with no clear objection — give them an out, build trust",
         )
 
-    # 4. Objection-specific paths -------------------------------------------
-    # prior_price_count was computed earlier for the signal rules; reuse it.
+    # 5. Objection-specific paths -------------------------------------------
+    # prior_price_count and discounts_count were computed at the top.
     prior_trust_count = p.prior_objection_types.count(ObjectionType.TRUST)
     prior_timing_count = p.prior_objection_types.count(ObjectionType.TIMING)
-    discounts_count = len(p.discounts_offered)
 
     if p.objection_type == ObjectionType.PRICE:
         # First PRICE mention → ISOLATE (confirm it's the only blocker)
@@ -213,7 +249,7 @@ def decide(p: Perception) -> Decision:
             return _decision(Tactic.ASK_OPEN, "specific informational gap — ask what they need to know")
         return _decision(Tactic.MIRROR, "general confusion — mirror so they elaborate")
 
-    # 5. Fallback -----------------------------------------------------------
+    # 6. Fallback -----------------------------------------------------------
     return _decision(Tactic.ASK_OPEN, "no decisive signal — deepen understanding")
 
 
