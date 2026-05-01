@@ -1,7 +1,14 @@
 import time
 from collections.abc import AsyncGenerator
 
-from openai import AsyncOpenAI, APIError, APITimeoutError, RateLimitError
+from openai import (
+    APIConnectionError,
+    APIError,
+    APITimeoutError,
+    AsyncOpenAI,
+    AuthenticationError,
+    RateLimitError,
+)
 
 from app.config.settings import settings
 from app.utils.errors import LLMError
@@ -16,6 +23,21 @@ _OPENAI_PARAMS: dict = {
 
 def _build_messages(system_prompt: str, messages: list[dict]) -> list[dict]:
     return [{"role": "system", "content": system_prompt}, *messages]
+
+
+def _raise_llm_error(log, exc: Exception) -> None:
+    log.error("llm_error", error_type=type(exc).__name__, message=str(exc))
+    if isinstance(exc, AuthenticationError):
+        raise LLMError("OpenAI authentication failed. Check OPENAI_API_KEY.") from exc
+    if isinstance(exc, RateLimitError):
+        raise LLMError("Rate limit reached, try again shortly") from exc
+    if isinstance(exc, APITimeoutError):
+        raise LLMError("LLM response timed out") from exc
+    if isinstance(exc, APIConnectionError):
+        raise LLMError("OpenAI connection failed. Check network/DNS access.") from exc
+    if isinstance(exc, APIError):
+        raise LLMError(f"LLM API error: {exc.message}") from exc
+    raise exc
 
 
 async def generate_response(system_prompt: str, messages: list[dict], call_id: str) -> str:
@@ -41,12 +63,8 @@ async def generate_response(system_prompt: str, messages: list[dict], call_id: s
         log.debug("llm_text", text=text)
         return text
 
-    except RateLimitError as e:
-        raise LLMError("Rate limit reached, try again shortly") from e
-    except APITimeoutError as e:
-        raise LLMError("LLM response timed out") from e
-    except APIError as e:
-        raise LLMError(f"LLM API error: {e.message}") from e
+    except Exception as exc:
+        _raise_llm_error(log, exc)
 
 
 async def stream_response(
@@ -71,9 +89,5 @@ async def stream_response(
                 yield delta
         duration_ms = round((time.perf_counter() - start) * 1000, 2)
         log.info("llm_stream_response", duration_ms=duration_ms, chunks=chunk_count)
-    except RateLimitError as e:
-        raise LLMError("Rate limit reached, try again shortly") from e
-    except APITimeoutError as e:
-        raise LLMError("LLM response timed out") from e
-    except APIError as e:
-        raise LLMError(f"LLM API error: {e.message}") from e
+    except Exception as exc:
+        _raise_llm_error(log, exc)

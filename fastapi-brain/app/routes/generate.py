@@ -32,11 +32,8 @@ async def generate_stream(body: GenerateResponseRequest, request: Request) -> St
     messages = build_conversation_messages(body)
 
     async def event_generator() -> AsyncGenerator[str, None]:
-        try:
-            async for chunk in stream_response(system_prompt, messages, body.call_id):
-                yield f"data: {json.dumps({'text': chunk})}\n\n"
-        except Exception:
-            pass
+        async for chunk in stream_response(system_prompt, messages, body.call_id):
+            yield f"data: {json.dumps({'text': chunk})}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")

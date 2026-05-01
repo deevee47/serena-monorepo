@@ -22,7 +22,11 @@ import {
   recordDiscountOffered,
   detectFollowUpRequest,
 } from '../services/negotiation.service.js';
-import { getProductById, toProductContext } from '../services/product.service.js';
+import {
+  findAlternativeProduct,
+  getProductById,
+  toProductContext,
+} from '../services/product.service.js';
 import { insertCallTurn } from '../services/db.service.js';
 import { ConversationStage, ObjectionType } from '../types/session.types.js';
 import type { ClassifyObjectionResponse } from '../services/brain.service.js';
@@ -89,6 +93,24 @@ export default async function vapiLlmRoutes(app: FastifyInstance) {
     if (detectFollowUpRequest(utterance)) stageUpdates.followUpRequested = true;
 
     const product = getProductById(current.currentProductId);
+    let alternativeProductContext = null;
+    if (classify.objection_type === ObjectionType.PRICE && product) {
+      try {
+        alternativeProductContext = await findAlternativeProduct(current.currentProductId, 'PRICE');
+        if (alternativeProductContext) {
+          log.info(
+            {
+              current_product_id: current.currentProductId,
+              alternative_product_id: alternativeProductContext.product_id,
+            },
+            'Alternative product loaded from Pinecone',
+          );
+        }
+      } catch (err) {
+        log.error({ err, current_product_id: current.currentProductId }, 'Failed to load alternative product');
+      }
+    }
+
     const rawHistory = await getRecentHistory(callId, 4);
     const history: BrainConversationTurn[] = rawHistory.map((t) => ({
       speaker: t.speaker,
@@ -107,6 +129,7 @@ export default async function vapiLlmRoutes(app: FastifyInstance) {
         objection_type: classify.objection_type,
         conversation_history: history,
         product_context: product ? toProductContext(product) : null,
+        alternative_product_context: alternativeProductContext,
       });
       generatedText = res.text;
     } catch (err) {

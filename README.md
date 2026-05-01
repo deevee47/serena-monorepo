@@ -82,14 +82,18 @@ For local development without Docker (faster hot-reload):
 docker-compose up -d redis
 
 # Terminal 2 — Node gateway
-cd node-gateway && bun --hot src/server.ts
+cd node-gateway && FASTAPI_BRAIN_URL=http://127.0.0.1:8000 bun --hot src/server.ts
 
 # Terminal 3 — FastAPI brain
-cd fastapi-brain && uv run uvicorn app.main:app --reload --port 8000
+cd fastapi-brain && NODE_GATEWAY_URL=http://127.0.0.1:3000 uv run uvicorn app.main:app --reload --port 8000
 
 # Terminal 4 — BullMQ worker
 cd node-gateway && bun src/workers.ts
 ```
+
+The shared `.env` defaults use Docker service hostnames such as `fastapi-brain`
+and `node-gateway`. When you run both services directly on your host, override
+those URLs to `127.0.0.1` as shown above.
 
 ---
 

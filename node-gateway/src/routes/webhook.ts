@@ -28,7 +28,11 @@ import {
   recordDiscountOffered,
   detectFollowUpRequest,
 } from '../services/negotiation.service.js';
-import { getProductById, toProductContext } from '../services/product.service.js';
+import {
+  findAlternativeProduct,
+  getProductById,
+  toProductContext,
+} from '../services/product.service.js';
 import { createCallRecord, insertCallTurn } from '../services/db.service.js';
 import { callEndQueue, analyticsQueue, crmQueue } from '../queues/index.js';
 import { ConversationStage, ObjectionType } from '../types/session.types.js';
@@ -93,6 +97,23 @@ async function processTranscript(callId: string, utterance: string): Promise<voi
 
   const product = getProductById(currentSession.currentProductId);
   const productContext = product ? toProductContext(product) : null;
+  let alternativeProductContext = null;
+  if (classify.objection_type === ObjectionType.PRICE && product) {
+    try {
+      alternativeProductContext = await findAlternativeProduct(currentSession.currentProductId, 'PRICE');
+      if (alternativeProductContext) {
+        log.info(
+          {
+            current_product_id: currentSession.currentProductId,
+            alternative_product_id: alternativeProductContext.product_id,
+          },
+          'Alternative product loaded from Pinecone',
+        );
+      }
+    } catch (err) {
+      log.error({ err, current_product_id: currentSession.currentProductId }, 'Failed to load alternative product');
+    }
+  }
 
   const rawHistory = await getRecentHistory(callId, 4);
   const history: BrainConversationTurn[] = rawHistory.map((t) => ({
@@ -112,6 +133,7 @@ async function processTranscript(callId: string, utterance: string): Promise<voi
       objection_type: classify.objection_type,
       conversation_history: history,
       product_context: productContext,
+      alternative_product_context: alternativeProductContext,
     },
     (chunk) => {
       // Fire Vapi /say on the first chunk for fast time-to-first-word
