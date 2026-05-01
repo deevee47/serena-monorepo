@@ -39,6 +39,19 @@ export type CrmJobData = {
   productId: string;
 };
 
+// Fire-and-forget classification of a USER turn for analytics. The /converse
+// pipeline doesn't run /classify in the critical path; this queue picks up
+// the slack so the call_turns row gets objection_type + subtype populated
+// for downstream dashboards. Survives gateway restarts (better than
+// `void promise.catch(...)`).
+export type ClassifyAnalyticsJobData = {
+  callId: string;
+  callTurnId: string; // FK into call_turns
+  utterance: string;
+  stage: string;
+  score: number;
+};
+
 const defaultJobOptions = {
   attempts: 3,
   backoff: { type: 'exponential' as const, delay: 2000 },
@@ -58,3 +71,8 @@ export const crmQueue = new Queue<CrmJobData>('crm-queue', {
   connection: redisConnection,
   defaultJobOptions,
 });
+
+export const classifyAnalyticsQueue = new Queue<ClassifyAnalyticsJobData>(
+  'classify-analytics-queue',
+  { connection: redisConnection, defaultJobOptions },
+);

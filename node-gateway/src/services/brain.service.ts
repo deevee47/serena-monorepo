@@ -1,12 +1,20 @@
+/**
+ * Brain HTTP client. Three endpoints under the converse pipeline:
+ *   - /classify (analytics-only — runs async via the analytics queue)
+ *   - /converse + /converse/stream (single LLM call per turn with tools)
+ *   - /products/alternatives (Pinecone semantic search)
+ */
+
 import got from 'got';
 import CircuitBreaker from 'opossum';
 import { config } from '../config/env.js';
 import { AppError, ErrorCodes } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
-import type { ObjectionType, ConversationStage } from '../types/session.types.js';
+import type { ConversationStage, ObjectionType } from '../types/session.types.js';
 import type { ProductContext } from './product.service.js';
 
-// These interfaces mirror shared/contracts/brain-api.types.ts — keep in sync
+// These types mirror shared/contracts/brain-api.types.ts — keep in sync.
+
 export type BrainConversationTurn = {
   speaker: 'USER' | 'AGENT';
   utterance: string;
@@ -24,68 +32,49 @@ export type ClassifyObjectionResponse = {
   objection_type: ObjectionType;
   confidence: number;
   sentiment: 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL';
-  // B-2: fine-grained subtype, populated by the Pinecone classifier path.
-  // null on LLM fallback. Examples: 'too_expensive', 'found_cheaper', etc.
   subtype?: string | null;
 };
 
-export type GenerateResponseRequest = {
+export type CartItemPayload = {
+  product_id: string;
+  name: string;
+  price: number;
+  quantity?: number;
+};
+
+export type CartContextPayload = {
+  items: CartItemPayload[];
+  total: number;
+  abandoned_minutes_ago?: number | null;
+};
+
+export type ToolName = 'send_whatsapp_checkout_link' | 'send_whatsapp_product_info';
+
+export type ConverseToolCall = {
+  name: ToolName;
+  args: Record<string, unknown>;
+};
+
+export type ConverseRequest = {
   call_id: string;
   utterance: string;
-  stage: ConversationStage;
-  score: number;
-  discount_available: number;
-  objection_type: ObjectionType | null;
-  conversation_history: BrainConversationTurn[];
-  product_context: ProductContext | null;
-  alternative_product_context?: ProductContext | null;
-};
-
-export type GenerateResponseResponse = {
-  text: string;
-};
-
-// ─── Tactic-driven pipeline (Decision + Speech) ────────────────────────────
-// Mirrors shared/contracts/brain-api.types.ts.
-
-export type Tactic =
-  | 'ASK_OPEN'
-  | 'ASK_DISQUALIFY'
-  | 'MIRROR'
-  | 'ISOLATE'
-  | 'REFRAME'
-  | 'CONCESSION_REAL'
-  | 'CONCESSION_NON_MONETARY'
-  | 'ALTERNATIVE_PIVOT'
-  | 'PERMISSION_PUSH'
-  | 'TIME_CAPTURE'
-  | 'TRIAL_CLOSE'
-  | 'ASSUMPTIVE_CLOSE'
-  | 'GRACEFUL_EXIT'
-  | 'SEND_CHECKOUT_LINK_WHATSAPP'
-  | 'SEND_PRODUCT_INFO_WHATSAPP';
-
-// DecideRequest lives in decide-request.builder.ts so the (pure) builder
-// module has no transitive dependency on this file (which loads env config).
-import type { DecideRequest } from './decide-request.builder.js';
-export type { DecideRequest };
-
-export type DecideResponse = {
-  tactic: Tactic;
-  reasoning: string;
-  micro_guidance: string;
-};
-
-export type GenerateTacticRequest = {
-  call_id: string;
-  utterance: string;
-  tactic: Tactic;
-  micro_guidance: string;
   conversation_history?: BrainConversationTurn[];
   product_context?: ProductContext | null;
   alternative_product_context?: ProductContext | null;
-  discount_available?: number;
+  cart_context?: CartContextPayload | null;
+  discounts_already_offered?: number[];
 };
+
+export type ConverseResponse = {
+  text: string;
+  tool_call?: ConverseToolCall | null;
+  finish_reason?: string | null;
+};
+
+export type ConverseStreamEvent =
+  | { type: 'text'; delta: string }
+  | { type: 'tool_call'; name: ToolName; args: Record<string, unknown> }
+  | { type: 'done'; finish_reason?: string | null };
 
 export type AlternativesRequest = {
   query: string;
@@ -98,82 +87,53 @@ export type AlternativesResponse = {
   alternatives: ProductContext[];
 };
 
-export const FALLBACK_RESPONSES: Record<ConversationStage, string> = {
-  INTRO: 'Give me just a moment.',
-  PITCH: 'Let me think about the best way to explain this.',
-  OBJECTION: "That's a great point — could you say a bit more about that?",
-  NEGOTIATION: 'I want to make sure I get this right for you.',
-  CLOSE: 'Could you give me just a second?',
-  END: 'Thank you so much for your time today.',
-};
-
 const client = got.extend({
   prefixUrl: config.FASTAPI_BRAIN_URL,
   headers: { 'X-Internal-Secret': config.INTERNAL_SERVICE_SECRET },
 });
 
-function getBrainErrorDetails(err: unknown): { statusCode?: number; message: string; details?: unknown } {
+function getBrainErrorDetails(err: unknown): {
+  statusCode?: number;
+  message: string;
+  details?: unknown;
+} {
   if (err instanceof Error && err.name === 'TimeoutError') {
     return { statusCode: 504, message: 'Brain request timed out' };
   }
-
   if (typeof err === 'object' && err !== null && 'response' in err) {
-    const response = (err as {
-      response?: {
-        statusCode?: number;
-        body?: unknown;
-      };
-    }).response;
+    const response = (err as { response?: { statusCode?: number; body?: unknown } })
+      .response;
     const body = response?.body;
     const brainMessage =
       typeof body === 'object' && body !== null && 'error' in body
         ? (body as { error?: { message?: string } }).error?.message
         : undefined;
-
     return {
       statusCode: response?.statusCode,
-      message: brainMessage ?? (err instanceof Error ? err.message : 'Brain request failed'),
+      message:
+        brainMessage ?? (err instanceof Error ? err.message : 'Brain request failed'),
       details: body,
     };
   }
-
-  return {
-    message: err instanceof Error ? err.message : 'Brain request failed',
-  };
+  return { message: err instanceof Error ? err.message : 'Brain request failed' };
 }
+
+// ─── /classify ─────────────────────────────────────────────────────────────
 
 async function classifyFn(req: ClassifyObjectionRequest): Promise<ClassifyObjectionResponse> {
   const start = Date.now();
   try {
     const result = await client.post('classify', { json: req }).json<ClassifyObjectionResponse>();
-    logger.debug({ call_id: req.call_id, endpoint: 'classify', duration_ms: Date.now() - start }, 'Brain call');
+    logger.debug(
+      { call_id: req.call_id, endpoint: 'classify', duration_ms: Date.now() - start },
+      'Brain call',
+    );
     return result;
   } catch (err) {
     const details = getBrainErrorDetails(err);
     logger.error({ call_id: req.call_id, err, brain_error: details }, 'Brain classify error');
     if (details.statusCode === 504) {
       throw new AppError(504, ErrorCodes.BRAIN_TIMEOUT, 'Brain timeout on classify', details.details);
-    }
-    throw new AppError(
-      details.statusCode ?? 503,
-      ErrorCodes.BRAIN_UNREACHABLE,
-      details.message,
-      details.details,
-    );
-  }
-}
-
-async function generateFn(req: GenerateResponseRequest): Promise<GenerateResponseResponse> {
-  const start = Date.now();
-  try {
-    const result = await client.post('generate', { json: req }).json<GenerateResponseResponse>();
-    logger.debug({ call_id: req.call_id, endpoint: 'generate', duration_ms: Date.now() - start }, 'Brain call');
-    return result;
-  } catch (err) {
-    const details = getBrainErrorDetails(err);
-    logger.error({ call_id: req.call_id, err, brain_error: details }, 'Brain generate error');
-    if (details.statusCode === 504) {
-      throw new AppError(504, ErrorCodes.BRAIN_TIMEOUT, 'Brain timeout on generate', details.details);
     }
     throw new AppError(
       details.statusCode ?? 503,
@@ -197,36 +157,28 @@ classifyBreaker.fallback(() => ({
   subtype: null,
 }));
 
-const generateBreaker = new CircuitBreaker(generateFn, {
-  timeout: 12000,
-  errorThresholdPercentage: 50,
-  resetTimeout: 30000,
-  volumeThreshold: 5,
-});
-generateBreaker.fallback((req: GenerateResponseRequest) => ({
-  text: FALLBACK_RESPONSES[req.stage] ?? 'Give me just a moment.',
-}));
-
-export async function classifyObjection(req: ClassifyObjectionRequest): Promise<ClassifyObjectionResponse> {
+export async function classifyObjection(
+  req: ClassifyObjectionRequest,
+): Promise<ClassifyObjectionResponse> {
   return classifyBreaker.fire(req) as Promise<ClassifyObjectionResponse>;
 }
 
-export async function generateResponse(req: GenerateResponseRequest): Promise<GenerateResponseResponse> {
-  return generateBreaker.fire(req) as Promise<GenerateResponseResponse>;
-}
+// ─── /converse ─────────────────────────────────────────────────────────────
 
-// ─── /decide ──────────────────────────────────────────────────────────────
-async function decideFn(req: DecideRequest): Promise<DecideResponse> {
+async function converseFn(req: ConverseRequest): Promise<ConverseResponse> {
   const start = Date.now();
   try {
-    const result = await client.post('decide', { json: req }).json<DecideResponse>();
-    logger.debug({ call_id: req.call_id, endpoint: 'decide', duration_ms: Date.now() - start }, 'Brain call');
+    const result = await client.post('converse', { json: req }).json<ConverseResponse>();
+    logger.debug(
+      { call_id: req.call_id, endpoint: 'converse', duration_ms: Date.now() - start },
+      'Brain call',
+    );
     return result;
   } catch (err) {
     const details = getBrainErrorDetails(err);
-    logger.error({ call_id: req.call_id, err, brain_error: details }, 'Brain decide error');
+    logger.error({ call_id: req.call_id, err, brain_error: details }, 'Brain converse error');
     if (details.statusCode === 504) {
-      throw new AppError(504, ErrorCodes.BRAIN_TIMEOUT, 'Brain timeout on decide', details.details);
+      throw new AppError(504, ErrorCodes.BRAIN_TIMEOUT, 'Brain timeout on converse', details.details);
     }
     throw new AppError(
       details.statusCode ?? 503,
@@ -237,75 +189,45 @@ async function decideFn(req: DecideRequest): Promise<DecideResponse> {
   }
 }
 
-const decideBreaker = new CircuitBreaker(decideFn, {
-  timeout: 5000,
-  errorThresholdPercentage: 50,
-  resetTimeout: 30000,
-  volumeThreshold: 5,
-});
-// Fallback when /decide is unavailable: pick a safe default tactic. ASK_OPEN
-// is the lowest-risk choice — surfaces information without committing to a
-// stance. Includes minimal micro-guidance so the speech prompt still works.
-decideBreaker.fallback(
-  (): DecideResponse => ({
-    tactic: 'ASK_OPEN',
-    reasoning: 'decide endpoint unavailable — safe fallback to deepen understanding',
-    micro_guidance:
-      'Ask one open question to find out what they care about. Stop after the question.',
-  }),
-);
-
-export async function decide(req: DecideRequest): Promise<DecideResponse> {
-  return decideBreaker.fire(req) as Promise<DecideResponse>;
-}
-
-// ─── /generate-tactic ─────────────────────────────────────────────────────
-async function generateTacticFn(req: GenerateTacticRequest): Promise<GenerateResponseResponse> {
-  const start = Date.now();
-  try {
-    const result = await client.post('generate-tactic', { json: req }).json<GenerateResponseResponse>();
-    logger.debug({ call_id: req.call_id, endpoint: 'generate-tactic', duration_ms: Date.now() - start }, 'Brain call');
-    return result;
-  } catch (err) {
-    const details = getBrainErrorDetails(err);
-    logger.error({ call_id: req.call_id, err, brain_error: details }, 'Brain generate-tactic error');
-    if (details.statusCode === 504) {
-      throw new AppError(504, ErrorCodes.BRAIN_TIMEOUT, 'Brain timeout on generate-tactic', details.details);
-    }
-    throw new AppError(
-      details.statusCode ?? 503,
-      ErrorCodes.BRAIN_UNREACHABLE,
-      details.message,
-      details.details,
-    );
-  }
-}
-
-const generateTacticBreaker = new CircuitBreaker(generateTacticFn, {
+const converseBreaker = new CircuitBreaker(converseFn, {
   timeout: 12000,
   errorThresholdPercentage: 50,
   resetTimeout: 30000,
   volumeThreshold: 5,
 });
-// No stage on this request — fall back to a generic "give me a moment" line.
-generateTacticBreaker.fallback(
-  (): GenerateResponseResponse => ({ text: 'Give me just a moment.' }),
+// CRITICAL: fallback returns text-only with no tool_call. We must NEVER
+// synthesize a tool call from a fallback — that could fire a real WhatsApp
+// send with garbage args during a brain outage.
+converseBreaker.fallback(
+  (): ConverseResponse => ({
+    text: 'Give me just a moment.',
+    tool_call: null,
+    finish_reason: 'fallback',
+  }),
 );
 
-export async function generateTactic(req: GenerateTacticRequest): Promise<GenerateResponseResponse> {
-  return generateTacticBreaker.fire(req) as Promise<GenerateResponseResponse>;
+export async function converse(req: ConverseRequest): Promise<ConverseResponse> {
+  return converseBreaker.fire(req) as Promise<ConverseResponse>;
 }
 
-// SSE streaming variant — same pattern as generateResponseStream so we can
-// fire Vapi /say on the first chunk for low time-to-first-word.
-export async function generateTacticStream(
-  req: GenerateTacticRequest,
-  onChunk: (text: string) => void,
-): Promise<string> {
+/**
+ * SSE-streaming variant. The brain emits typed events `{type, ...}`. The
+ * caller gets a callback per text delta (for Vapi /say firing) and an
+ * optional finalized tool_call. Returns the assembled text and tool_call.
+ *
+ * On error, falls back to `converse()` for a non-streaming retry, then to
+ * a generic text reply if that also fails. NEVER synthesizes a tool_call.
+ */
+export async function converseStream(
+  req: ConverseRequest,
+  onTextDelta: (delta: string) => void,
+): Promise<{ text: string; tool_call: ConverseToolCall | null; finish_reason: string | null }> {
   const buffer: string[] = [];
+  let toolCall: ConverseToolCall | null = null;
+  let finishReason: string | null = null;
 
   try {
-    const response = await fetch(`${config.FASTAPI_BRAIN_URL}/generate-tactic/stream`, {
+    const response = await fetch(`${config.FASTAPI_BRAIN_URL}/converse/stream`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -317,15 +239,14 @@ export async function generateTacticStream(
     });
 
     if (!response.ok || !response.body) {
-      throw new Error(`generate-tactic stream request failed: ${response.status}`);
+      throw new Error(`converse stream request failed: ${response.status}`);
     }
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let lineBuffer = '';
-    let finished = false;
 
-    while (!finished) {
+    while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       lineBuffer += decoder.decode(value, { stream: true });
@@ -334,27 +255,55 @@ export async function generateTacticStream(
 
       for (const line of lines) {
         if (!line.startsWith('data: ')) continue;
-        const data = line.slice(6).trim();
-        if (data === '[DONE]') { finished = true; break; }
+        const raw = line.slice(6).trim();
+        if (!raw) continue;
+        let event: ConverseStreamEvent;
         try {
-          const parsed = JSON.parse(data) as { text: string };
-          buffer.push(parsed.text);
-          onChunk(parsed.text);
+          event = JSON.parse(raw) as ConverseStreamEvent;
         } catch {
-          // ignore malformed SSE lines
+          continue;
+        }
+        if (event.type === 'text') {
+          buffer.push(event.delta);
+          onTextDelta(event.delta);
+        } else if (event.type === 'tool_call') {
+          toolCall = { name: event.name, args: event.args };
+        } else if (event.type === 'done') {
+          finishReason = event.finish_reason ?? null;
         }
       }
     }
 
-    return buffer.join('').trim() || 'Give me just a moment.';
+    return {
+      text: buffer.join('').trim(),
+      tool_call: toolCall,
+      finish_reason: finishReason,
+    };
   } catch (err) {
-    logger.error({ call_id: req.call_id, err }, 'generateTacticStream failed — using buffered partial or non-streaming retry');
-    const partial = buffer.join('').trim();
-    if (partial) return partial;
-    const result = await generateTactic(req).catch(() => ({ text: 'Give me just a moment.' }));
-    return result.text;
+    logger.error(
+      { call_id: req.call_id, err },
+      'converseStream failed — falling back to non-streaming converse',
+    );
+    const partialText = buffer.join('').trim();
+    if (partialText || toolCall) {
+      return { text: partialText, tool_call: toolCall, finish_reason: 'stream_error' };
+    }
+    const result = await converse(req).catch(
+      (): ConverseResponse => ({
+        text: 'Give me just a moment.',
+        tool_call: null,
+        finish_reason: 'fallback',
+      }),
+    );
+    return {
+      text: result.text,
+      tool_call: result.tool_call ?? null,
+      finish_reason: result.finish_reason ?? 'fallback',
+    };
   }
 }
+
+// ─── /products/alternatives ────────────────────────────────────────────────
 
 async function alternativesFn(req: AlternativesRequest): Promise<AlternativesResponse> {
   const start = Date.now();
@@ -362,7 +311,10 @@ async function alternativesFn(req: AlternativesRequest): Promise<AlternativesRes
     const result = await client
       .post('products/alternatives', { json: req })
       .json<AlternativesResponse>();
-    logger.debug({ endpoint: 'products/alternatives', duration_ms: Date.now() - start }, 'Brain call');
+    logger.debug(
+      { endpoint: 'products/alternatives', duration_ms: Date.now() - start },
+      'Brain call',
+    );
     return result;
   } catch (err) {
     logger.error({ err }, 'Brain alternatives error');
@@ -381,67 +333,8 @@ const alternativesBreaker = new CircuitBreaker(alternativesFn, {
 });
 alternativesBreaker.fallback(() => ({ alternatives: [] }));
 
-export async function findProductAlternatives(req: AlternativesRequest): Promise<AlternativesResponse> {
+export async function findProductAlternatives(
+  req: AlternativesRequest,
+): Promise<AlternativesResponse> {
   return alternativesBreaker.fire(req) as Promise<AlternativesResponse>;
-}
-
-export async function generateResponseStream(
-  req: GenerateResponseRequest,
-  onChunk: (text: string) => void,
-): Promise<string> {
-  const buffer: string[] = [];
-
-  try {
-    const response = await fetch(`${config.FASTAPI_BRAIN_URL}/generate/stream`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Internal-Secret': config.INTERNAL_SERVICE_SECRET,
-        'X-Call-ID': req.call_id,
-      },
-      body: JSON.stringify(req),
-      signal: AbortSignal.timeout(15_000),
-    });
-
-    if (!response.ok || !response.body) {
-      throw new Error(`Stream request failed: ${response.status}`);
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let lineBuffer = '';
-    let finished = false;
-
-    while (!finished) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      lineBuffer += decoder.decode(value, { stream: true });
-      const lines = lineBuffer.split('\n');
-      lineBuffer = lines.pop() ?? '';
-
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const data = line.slice(6).trim();
-        if (data === '[DONE]') { finished = true; break; }
-        try {
-          const parsed = JSON.parse(data) as { text: string };
-          buffer.push(parsed.text);
-          onChunk(parsed.text);
-        } catch {
-          // ignore malformed SSE lines
-        }
-      }
-    }
-
-    const fullText = buffer.join('').trim();
-    return fullText || (FALLBACK_RESPONSES[req.stage] ?? 'Give me just a moment.');
-  } catch (err) {
-    logger.error({ call_id: req.call_id, err }, 'generateResponseStream failed — using buffered partial or fallback');
-    const partial = buffer.join('').trim();
-    if (partial) return partial;
-    const result = await generateResponse(req).catch(() => ({
-      text: FALLBACK_RESPONSES[req.stage] ?? 'Give me just a moment.',
-    }));
-    return result.text;
-  }
 }

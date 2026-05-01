@@ -39,6 +39,28 @@ class ProductContext(BaseModel):
     key_features: list[str]
 
 
+class CartItem(BaseModel):
+    """A line item in the customer's abandoned cart. Demo-grade — real
+    integrations should source this from the storefront's cart service."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    product_id: str
+    name: str
+    price: float
+    quantity: int = 1
+
+
+class CartContext(BaseModel):
+    """The customer's cart at the moment the agent picked up the call."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    items: list[CartItem]
+    total: float
+    abandoned_minutes_ago: int | None = None
+
+
 class ClassifyObjectionRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -71,21 +93,20 @@ class AlternativesRequest(BaseModel):
     top_k: int = 3
 
 
-class GenerateTacticRequest(BaseModel):
-    """Tactic-driven generation. Caller has already run /classify and /decide
-    (or chosen a tactic some other way) and is now asking the brain to express
-    that tactic as natural voice speech."""
+class ConverseRequest(BaseModel):
+    """Single-call function-calling LLM converse request. The LLM gets the
+    conversation history, the product/cart facts, and the tool schemas — it
+    decides whether to talk, call a tool, or both."""
 
     model_config = ConfigDict(populate_by_name=True)
 
     call_id: str
     utterance: str  # what the customer just said
-    tactic: str  # one of services/tactics.py Tactic values
-    micro_guidance: str  # the per-tactic guidance from services/tactics.py
     conversation_history: list[ConversationTurn] = []
     product_context: ProductContext | None = None
     alternative_product_context: ProductContext | None = None
-    discount_available: int = 0
+    cart_context: CartContext | None = None
+    discounts_already_offered: list[int] = []  # e.g. [] | [5] | [5, 10]
 
 
 class DecideRequest(BaseModel):

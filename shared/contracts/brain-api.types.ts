@@ -1,3 +1,6 @@
+// Wire types between node-gateway and fastapi-brain. Keep in sync with
+// fastapi-brain/app/models/{requests,responses}.py.
+
 export enum ObjectionType {
   PRICE = 'PRICE',
   TRUST = 'TRUST',
@@ -30,6 +33,21 @@ export interface ProductContext {
   key_features: string[];
 }
 
+export interface CartItem {
+  product_id: string;
+  name: string;
+  price: number;
+  quantity?: number;
+}
+
+export interface CartContext {
+  items: CartItem[];
+  total: number;
+  abandoned_minutes_ago?: number | null;
+}
+
+// ─── /classify (analytics-only under converse pipeline) ────────────────────
+
 export interface ClassifyObjectionRequest {
   call_id: string;
   utterance: string;
@@ -39,103 +57,56 @@ export interface ClassifyObjectionRequest {
 
 export interface ClassifyObjectionResponse {
   objection_type: ObjectionType;
-  confidence: number; // 0.0 to 1.0
+  confidence: number; // 0.0 – 1.0
   sentiment: 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL';
-  // B-2: fine-grained sub-type — populated by the Pinecone classifier path,
-  // null on LLM fallback. Examples per objection_type:
-  //   PRICE: 'too_expensive' | 'found_cheaper' | 'budget' | 'bad_value'
-  //          | 'wants_discount' | 'sticker_shock' | 'high_intent' | ...
-  //   TRUST: 'brand_unknown' | 'quality_doubt' | 'reviews_concern'
-  //          | 'refund_policy' | 'warranty' | 'scam_fear' | ...
-  //   TIMING: 'not_now' | 'spouse_decision' | 'wait_for_sale'
-  //           | 'comparison_shopping' | 'busy' | 'season_wrong' | 'ready_now'
-  //   CONFUSION: 'feature_unclear' | 'how_works' | 'comparison_unclear' | 'fit_size'
-  //   POSITIVE_SIGNAL: 'interested' | 'ready_to_buy' | 'asking_logistics'
-  //                    | 'compliment' | 'agreement'
-  //   NEUTRAL: 'backchannel' | 'acknowledgment'
   subtype?: string | null;
 }
 
-export interface GenerateResponseRequest {
+// ─── /converse (function-calling LLM) ──────────────────────────────────────
+// Single LLM call per turn. Replaces the rules-engine + tactic + speech-prompt
+// pipeline. The model decides whether to talk, call a tool, or both.
+
+export type ToolName = 'send_whatsapp_checkout_link' | 'send_whatsapp_product_info';
+
+export interface ConverseToolCall {
+  name: ToolName;
+  // Args are tool-specific. send_whatsapp_checkout_link accepts
+  // { discount_percent: 0-10 }. send_whatsapp_product_info accepts no args.
+  args: Record<string, unknown>;
+}
+
+export interface ConverseRequest {
   call_id: string;
   utterance: string;
-  stage: ConversationStage;
-  score: number;
-  discount_available: number;
-  objection_type: ObjectionType | null;
-  conversation_history: ConversationTurn[]; // last 4 turns only
-  product_context: ProductContext | null;
-  alternative_product_context?: ProductContext | null;
-}
-
-export interface GenerateResponseResponse {
-  text: string;
-}
-
-// ─── Decision layer ───────────────────────────────────────────────────────
-// Pick the next conversational tactic given the latest perception of the
-// customer. Pure rules engine — no LLM, no I/O. Inspectable per turn so
-// outcomes can be attributed to specific tactics.
-
-export type Tactic =
-  | 'ASK_OPEN'
-  | 'ASK_DISQUALIFY'
-  | 'MIRROR'
-  | 'ISOLATE'
-  | 'REFRAME'
-  | 'CONCESSION_REAL'
-  | 'CONCESSION_NON_MONETARY'
-  | 'ALTERNATIVE_PIVOT'
-  | 'PERMISSION_PUSH'
-  | 'TIME_CAPTURE'
-  | 'TRIAL_CLOSE'
-  | 'ASSUMPTIVE_CLOSE'
-  | 'GRACEFUL_EXIT'
-  // Tool-call tactics — gateway dispatches the matching service when picked.
-  | 'SEND_CHECKOUT_LINK_WHATSAPP'
-  | 'SEND_PRODUCT_INFO_WHATSAPP';
-
-export interface DecideRequest {
-  call_id: string;
-  objection_type: ObjectionType | null;
-  objection_subtype?: string | null;
-  sentiment?: 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL' | null;
-  stage: ConversationStage;
-  score: number;
-  turn_count: number;
-  prior_objection_types: ObjectionType[]; // full session history, not just last 4
-  discounts_offered: number[]; // e.g. [] | [5] | [5, 10]
-  has_alternative_product: boolean;
-  // Voice-channel signals (B-5). All optional. Tactic decision falls back to
-  // pre-B-5 behavior when missing — these only ever add precision.
-  utterance_length_trend?: number | null; // tokens/turn slope across recent USER utterances
-  filler_density?: number | null; // 0.0–1.0 ratio of filler tokens
-  response_latency_ms?: number | null; // most recent USER reply pre-response latency
-  // True when the agent has a real channel to follow through on (WhatsApp).
-  // Upgrades close / graceful-exit tactics into actual SEND_*_WHATSAPP moves.
-  whatsapp_available?: boolean;
-}
-
-export interface DecideResponse {
-  tactic: Tactic;
-  reasoning: string; // one-sentence justification for log attribution
-  micro_guidance: string; // 3-5 lines for the speech-layer prompt
-}
-
-// ─── Tactic-driven generation ─────────────────────────────────────────────
-// Speech-layer endpoint. Caller has already chosen a tactic (typically by
-// calling /decide); this just expresses it in 1–2 voice-natural sentences
-// using a small focused prompt instead of the legacy 4000-token persona block.
-
-export interface GenerateTacticRequest {
-  call_id: string;
-  utterance: string; // what the customer just said
-  tactic: Tactic;
-  micro_guidance: string;
   conversation_history?: ConversationTurn[];
   product_context?: ProductContext | null;
   alternative_product_context?: ProductContext | null;
-  discount_available?: number;
+  cart_context?: CartContext | null;
+  // The discount tiers offered earlier in this call, e.g. [] | [5] | [5, 10].
+  discounts_already_offered?: number[];
 }
 
-// Response shape is identical to GenerateResponseResponse (just `text`).
+export interface ConverseResponse {
+  text: string; // may be empty when the LLM only emits a tool call
+  tool_call?: ConverseToolCall | null;
+  finish_reason?: string | null;
+}
+
+// SSE event shapes returned by POST /converse/stream.
+export type ConverseStreamEvent =
+  | { type: 'text'; delta: string }
+  | { type: 'tool_call'; name: ToolName; args: Record<string, unknown> }
+  | { type: 'done'; finish_reason?: string | null };
+
+// ─── /products/alternatives ────────────────────────────────────────────────
+
+export interface AlternativesRequest {
+  query: string;
+  exclude_id: string;
+  current_price?: number;
+  top_k?: number;
+}
+
+export interface AlternativesResponse {
+  alternatives: ProductContext[];
+}
