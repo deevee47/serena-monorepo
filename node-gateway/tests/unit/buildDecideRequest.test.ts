@@ -34,6 +34,10 @@ describe('buildDecideRequest', () => {
       prior_objection_types: [ObjectionType.PRICE],
       discounts_offered: [5],
       has_alternative_product: true,
+      // Signal fields default to null when no recent utterances are passed.
+      utterance_length_trend: null,
+      filler_density: null,
+      response_latency_ms: null,
     });
   });
 
@@ -67,5 +71,33 @@ describe('buildDecideRequest', () => {
       classification: { ...baseClassification, subtype: null },
     });
     expect(req.objection_subtype).toBeNull();
+  });
+
+  it('returns null voice signals when no recent user utterances are provided', () => {
+    const req = buildDecideRequest(baseArgs);
+    expect(req.utterance_length_trend).toBeNull();
+    expect(req.filler_density).toBeNull();
+    expect(req.response_latency_ms).toBeNull();
+  });
+
+  it('derives utterance_length_trend from recent user utterances', () => {
+    const req = buildDecideRequest({
+      ...baseArgs,
+      recentUserUtterances: ['one two three four', 'one two', 'yes'],
+    });
+    expect(req.utterance_length_trend).toBeLessThan(0); // shrinking
+  });
+
+  it('derives filler_density from recent user utterances', () => {
+    const req = buildDecideRequest({
+      ...baseArgs,
+      recentUserUtterances: ['uh i guess maybe like sort of'],
+    });
+    expect(req.filler_density).toBeGreaterThan(0);
+  });
+
+  it('returns null filler density when no utterances supplied', () => {
+    const req = buildDecideRequest({ ...baseArgs, recentUserUtterances: [] });
+    expect(req.filler_density).toBeNull();
   });
 });

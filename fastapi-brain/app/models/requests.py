@@ -104,3 +104,8 @@ class DecideRequest(BaseModel):
     prior_objection_types: list[ObjectionType] = []
     discounts_offered: list[int] = []
     has_alternative_product: bool = False
+    # Voice-channel signals (B-5). All optional — when missing, signal-driven
+    # rules in decide() are skipped and behavior is identical to pre-B-5.
+    utterance_length_trend: float | None = None
+    filler_density: float | None = None
+    response_latency_ms: int | None = None

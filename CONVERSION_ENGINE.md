@@ -6,6 +6,40 @@
 
 ---
 
+## Voice-channel signals into the rules engine (shipped)
+
+The Decision layer can now react to *how* the customer is talking, not just
+what they say. Two signals derived from recent USER utterances:
+
+- **`utterance_length_trend`** — token-count slope across the last few user
+  replies. Sharply negative (≤ −1.5 tok/turn) = engagement collapsing.
+- **`filler_density`** — ratio of filler tokens (uh, um, like, "i guess",
+  ...) to total tokens. ≥ 0.15 = hesitation marker.
+- (`response_latency_ms` reserved on the wire — needs Vapi `speech-update`
+  events to populate; future work.)
+
+Two new rules in [decision.py](fastapi-brain/app/services/decision.py),
+inserted between the "buying signals" and "discovery openers" tiers:
+
+| When | Tactic | Reasoning |
+|---|---|---|
+| `utterance_length_trend` ≤ −1.5 (sharp decline) | `ASK_OPEN` | Engagement collapsing — no clever objection handling will help; re-engage with curiosity |
+| First `PRICE` + `filler_density` ≥ 0.15 | `MIRROR` (instead of `ISOLATE`) | They're uncertain themselves; mirror so they articulate before isolating |
+
+Hard exits and buying signals still take priority over both. When signals are
+absent (None), behavior is identical to pre-B-5.
+
+**Mirroring helpers:**
+- Python: [services/signals.py](fastapi-brain/app/services/signals.py)
+- TypeScript: [services/signals.ts](node-gateway/src/services/signals.ts)
+  Both implement the same two pure functions; node-gateway computes signals
+  in `buildDecideRequest` from the last ~5 USER utterances.
+
+**Test counts:** 113 brain tests (12 new for signals + 8 new for signal-driven
+rules) + 107 gateway tests (15 new for signals + 4 new buildDecideRequest cases).
+
+---
+
 ## Tactic attribution on every CallTurn (shipped)
 
 `CallTurn` schema gains 4 columns so every agent reply is attributable to a
@@ -234,8 +268,8 @@ Vapi gives metadata text agents don't have:
 | **B-2** ✅ | Sub-typed objections — vote() surfaces consensus subtype, threaded through API | shipped |
 | **B-3** ✅ | Decision layer — tactic library + rules engine + /decide endpoint | shipped |
 | **B-4** ✅ | Speech layer — small voice-rules + tactic micro-guidance prompt + /generate-tactic | shipped |
-| **B-5** | Voice-channel signals — interruption / latency / length-trend into Perception | ~1 day |
-| **B-6** | Tactic logging — `tactic_used` on every CallTurn for the learning loop | ~0.5 day |
+| **B-5** ✅ | Voice-channel signals — utterance_length_trend + filler_density + 2 rules | shipped |
+| **B-6** ✅ | Tactic logging — tactic + reasoning + subtype + pipeline on every CallTurn | shipped |
 
 **~10 days active to flip from persona-driven to tactic-driven.**
 
