@@ -1,0 +1,225 @@
+{"utterance": "that's too expensive for me", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "too_expensive"}
+{"utterance": "way out of my budget honestly", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "budget"}
+{"utterance": "i can't really afford that right now", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "budget"}
+{"utterance": "no way that's what it costs", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "sticker_shock"}
+{"utterance": "yeah that's a lot of money", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "sticker_shock"}
+{"utterance": "i found the same thing cheaper somewhere else", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "found_cheaper"}
+{"utterance": "amazon has it for less i think", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "found_cheaper"}
+{"utterance": "i saw a similar one for half the price", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "found_cheaper"}
+{"utterance": "that's not really worth it for what you get", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "bad_value"}
+{"utterance": "i don't think it's worth that much", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "bad_value"}
+{"utterance": "the price doesn't match the quality", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "bad_value"}
+{"utterance": "is there any way you can do better on price", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "wants_discount"}
+{"utterance": "any discount you can offer", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "wants_discount"}
+{"utterance": "what's the best you can do", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "wants_discount"}
+{"utterance": "i was hoping it'd be cheaper to be honest", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "too_expensive"}
+{"utterance": "uh that's a bit steep", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "too_expensive"}
+{"utterance": "look i just don't have that kind of money", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "budget"}
+{"utterance": "i mean it's a lot for what it is", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "bad_value"}
+{"utterance": "too pricey for me right now", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "too_expensive"}
+{"utterance": "the cost is the issue", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "too_expensive"}
+{"utterance": "i wasn't planning to spend that much", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "budget"}
+{"utterance": "honestly it's just outside what i wanted to pay", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "budget"}
+{"utterance": "is that the actual price or is there tax on top", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "sticker_shock"}
+{"utterance": "wow that's more than i expected", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "sticker_shock"}
+{"utterance": "i can get something similar for way less", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "found_cheaper"}
+{"utterance": "the competitor's running like a 30 percent off thing", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "found_cheaper"}
+{"utterance": "you really can't come down at all", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "wants_discount"}
+{"utterance": "what about a coupon or anything", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "wants_discount"}
+{"utterance": "i mean for that money i'd want more features", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "bad_value"}
+{"utterance": "it's just hard to justify the price", "objection_type": "PRICE", "sentiment": "NEGATIVE", "subtype": "bad_value"}
+{"utterance": "the price is fair but i'm comparing", "objection_type": "PRICE", "sentiment": "NEUTRAL", "subtype": "comparison"}
+{"utterance": "yeah the price is about what i expected", "objection_type": "PRICE", "sentiment": "NEUTRAL", "subtype": "comparison"}
+{"utterance": "what's the price again", "objection_type": "PRICE", "sentiment": "NEUTRAL", "subtype": "info_seek"}
+{"utterance": "and how much was it total", "objection_type": "PRICE", "sentiment": "NEUTRAL", "subtype": "info_seek"}
+{"utterance": "is that the final price including everything", "objection_type": "PRICE", "sentiment": "NEUTRAL", "subtype": "info_seek"}
+{"utterance": "so that's the cost yeah", "objection_type": "PRICE", "sentiment": "NEUTRAL", "subtype": "info_seek"}
+{"utterance": "the price is in the range i was thinking", "objection_type": "PRICE", "sentiment": "NEUTRAL", "subtype": "comparison"}
+{"utterance": "i need to think about whether the price works for me", "objection_type": "PRICE", "sentiment": "NEUTRAL", "subtype": "comparison"}
+{"utterance": "do you guys have payment plans or anything", "objection_type": "PRICE", "sentiment": "NEUTRAL", "subtype": "info_seek"}
+{"utterance": "what's the breakdown of the cost", "objection_type": "PRICE", "sentiment": "NEUTRAL", "subtype": "info_seek"}
+{"utterance": "it's a lot but i get why for what it is", "objection_type": "PRICE", "sentiment": "NEUTRAL", "subtype": "comparison"}
+{"utterance": "the price seems reasonable enough", "objection_type": "PRICE", "sentiment": "NEUTRAL", "subtype": "comparison"}
+{"utterance": "is the price negotiable", "objection_type": "PRICE", "sentiment": "NEUTRAL", "subtype": "info_seek"}
+{"utterance": "what if i bought two would there be a discount", "objection_type": "PRICE", "sentiment": "NEUTRAL", "subtype": "info_seek"}
+{"utterance": "okay so the total comes out to that", "objection_type": "PRICE", "sentiment": "NEUTRAL", "subtype": "info_seek"}
+{"utterance": "the price is steep but i love the product", "objection_type": "PRICE", "sentiment": "POSITIVE", "subtype": "high_intent"}
+{"utterance": "yeah it's a lot but it looks worth it", "objection_type": "PRICE", "sentiment": "POSITIVE", "subtype": "high_intent"}
+{"utterance": "i mean the price is high but the quality seems great", "objection_type": "PRICE", "sentiment": "POSITIVE", "subtype": "high_intent"}
+{"utterance": "honestly i'd pay that if it does what you say", "objection_type": "PRICE", "sentiment": "POSITIVE", "subtype": "high_intent"}
+{"utterance": "the price is okay actually given what i'm getting", "objection_type": "PRICE", "sentiment": "POSITIVE", "subtype": "high_intent"}
+{"utterance": "fair price for that kind of feature set", "objection_type": "PRICE", "sentiment": "POSITIVE", "subtype": "high_intent"}
+{"utterance": "i was prepared to spend that much", "objection_type": "PRICE", "sentiment": "POSITIVE", "subtype": "high_intent"}
+{"utterance": "for the value i think it's actually a good deal", "objection_type": "PRICE", "sentiment": "POSITIVE", "subtype": "high_intent"}
+{"utterance": "the price is on the higher end but i'm okay with it", "objection_type": "PRICE", "sentiment": "POSITIVE", "subtype": "high_intent"}
+{"utterance": "yeah i can swing that", "objection_type": "PRICE", "sentiment": "POSITIVE", "subtype": "high_intent"}
+{"utterance": "expensive but worth it i bet", "objection_type": "PRICE", "sentiment": "POSITIVE", "subtype": "high_intent"}
+{"utterance": "the price doesn't bother me if it works as advertised", "objection_type": "PRICE", "sentiment": "POSITIVE", "subtype": "high_intent"}
+{"utterance": "okay that's actually less than i thought", "objection_type": "PRICE", "sentiment": "POSITIVE", "subtype": "pleasant_surprise"}
+{"utterance": "oh that's not bad at all", "objection_type": "PRICE", "sentiment": "POSITIVE", "subtype": "pleasant_surprise"}
+{"utterance": "cheaper than i expected nice", "objection_type": "PRICE", "sentiment": "POSITIVE", "subtype": "pleasant_surprise"}
+{"utterance": "i'm not sure if i trust this brand", "objection_type": "TRUST", "sentiment": "NEGATIVE", "subtype": "brand_unknown"}
+{"utterance": "never heard of you guys before", "objection_type": "TRUST", "sentiment": "NEGATIVE", "subtype": "brand_unknown"}
+{"utterance": "how do i know this isn't a scam", "objection_type": "TRUST", "sentiment": "NEGATIVE", "subtype": "scam_fear"}
+{"utterance": "this sounds too good to be true honestly", "objection_type": "TRUST", "sentiment": "NEGATIVE", "subtype": "scam_fear"}
+{"utterance": "the reviews online were kind of mixed", "objection_type": "TRUST", "sentiment": "NEGATIVE", "subtype": "reviews_concern"}
+{"utterance": "i saw some bad reviews on trustpilot", "objection_type": "TRUST", "sentiment": "NEGATIVE", "subtype": "reviews_concern"}
+{"utterance": "what if it breaks though", "objection_type": "TRUST", "sentiment": "NEGATIVE", "subtype": "quality_doubt"}
+{"utterance": "doesn't really look that durable from the photos", "objection_type": "TRUST", "sentiment": "NEGATIVE", "subtype": "quality_doubt"}
+{"utterance": "what's your return policy if i don't like it", "objection_type": "TRUST", "sentiment": "NEGATIVE", "subtype": "refund_policy"}
+{"utterance": "can i return it if it doesn't work out", "objection_type": "TRUST", "sentiment": "NEGATIVE", "subtype": "refund_policy"}
+{"utterance": "do you actually honor the warranty", "objection_type": "TRUST", "sentiment": "NEGATIVE", "subtype": "warranty"}
+{"utterance": "what kind of guarantee comes with it", "objection_type": "TRUST", "sentiment": "NEGATIVE", "subtype": "warranty"}
+{"utterance": "are you sure this isn't one of those gimmicks", "objection_type": "TRUST", "sentiment": "NEGATIVE", "subtype": "scam_fear"}
+{"utterance": "this feels a bit shady to be honest", "objection_type": "TRUST", "sentiment": "NEGATIVE", "subtype": "scam_fear"}
+{"utterance": "i don't know your company at all", "objection_type": "TRUST", "sentiment": "NEGATIVE", "subtype": "brand_unknown"}
+{"utterance": "are you a real company", "objection_type": "TRUST", "sentiment": "NEGATIVE", "subtype": "brand_unknown"}
+{"utterance": "the quality might not be that great for the price", "objection_type": "TRUST", "sentiment": "NEGATIVE", "subtype": "quality_doubt"}
+{"utterance": "the materials look kind of cheap", "objection_type": "TRUST", "sentiment": "NEGATIVE", "subtype": "quality_doubt"}
+{"utterance": "i'm worried it'll fall apart in a month", "objection_type": "TRUST", "sentiment": "NEGATIVE", "subtype": "quality_doubt"}
+{"utterance": "what happens if i'm not satisfied", "objection_type": "TRUST", "sentiment": "NEGATIVE", "subtype": "refund_policy"}
+{"utterance": "i've read good reviews but i'm still a bit unsure", "objection_type": "TRUST", "sentiment": "NEUTRAL", "subtype": "reviews_concern"}
+{"utterance": "what do other customers usually say about it", "objection_type": "TRUST", "sentiment": "NEUTRAL", "subtype": "reviews_concern"}
+{"utterance": "tell me more about your company", "objection_type": "TRUST", "sentiment": "NEUTRAL", "subtype": "brand_unknown"}
+{"utterance": "how long have you been around", "objection_type": "TRUST", "sentiment": "NEUTRAL", "subtype": "brand_unknown"}
+{"utterance": "what's the warranty like", "objection_type": "TRUST", "sentiment": "NEUTRAL", "subtype": "warranty"}
+{"utterance": "and the return window is what again", "objection_type": "TRUST", "sentiment": "NEUTRAL", "subtype": "refund_policy"}
+{"utterance": "is this a well-known brand or new", "objection_type": "TRUST", "sentiment": "NEUTRAL", "subtype": "brand_unknown"}
+{"utterance": "do you have any reviews i could check", "objection_type": "TRUST", "sentiment": "NEUTRAL", "subtype": "reviews_concern"}
+{"utterance": "what materials is it made of", "objection_type": "TRUST", "sentiment": "NEUTRAL", "subtype": "quality_doubt"}
+{"utterance": "where is it manufactured", "objection_type": "TRUST", "sentiment": "NEUTRAL", "subtype": "quality_doubt"}
+{"utterance": "yeah i've heard great things about your brand actually", "objection_type": "TRUST", "sentiment": "POSITIVE", "subtype": "brand_recognized"}
+{"utterance": "my friend has one and loves it", "objection_type": "TRUST", "sentiment": "POSITIVE", "subtype": "brand_recognized"}
+{"utterance": "the reviews seem really good", "objection_type": "TRUST", "sentiment": "POSITIVE", "subtype": "reviews_positive"}
+{"utterance": "i looked you guys up and the company seems solid", "objection_type": "TRUST", "sentiment": "POSITIVE", "subtype": "brand_recognized"}
+{"utterance": "i trust your brand i've bought from you before", "objection_type": "TRUST", "sentiment": "POSITIVE", "subtype": "brand_recognized"}
+{"utterance": "the warranty sounds reassuring", "objection_type": "TRUST", "sentiment": "POSITIVE", "subtype": "warranty"}
+{"utterance": "okay so the return policy is generous", "objection_type": "TRUST", "sentiment": "POSITIVE", "subtype": "refund_policy"}
+{"utterance": "honestly the quality looks really good in the photos", "objection_type": "TRUST", "sentiment": "POSITIVE", "subtype": "quality_doubt"}
+{"utterance": "you guys have a good reputation as far as i can tell", "objection_type": "TRUST", "sentiment": "POSITIVE", "subtype": "brand_recognized"}
+{"utterance": "lots of positive reviews online", "objection_type": "TRUST", "sentiment": "POSITIVE", "subtype": "reviews_positive"}
+{"utterance": "i'm not ready to buy right now", "objection_type": "TIMING", "sentiment": "NEGATIVE", "subtype": "not_now"}
+{"utterance": "let me think about it for a bit", "objection_type": "TIMING", "sentiment": "NEGATIVE", "subtype": "not_now"}
+{"utterance": "i need to talk to my husband first", "objection_type": "TIMING", "sentiment": "NEGATIVE", "subtype": "spouse_decision"}
+{"utterance": "gotta check with my wife", "objection_type": "TIMING", "sentiment": "NEGATIVE", "subtype": "spouse_decision"}
+{"utterance": "i'll wait for the holiday sale", "objection_type": "TIMING", "sentiment": "NEGATIVE", "subtype": "wait_for_sale"}
+{"utterance": "isn't there usually a black friday discount", "objection_type": "TIMING", "sentiment": "NEGATIVE", "subtype": "wait_for_sale"}
+{"utterance": "i'm shopping around still", "objection_type": "TIMING", "sentiment": "NEGATIVE", "subtype": "comparison_shopping"}
+{"utterance": "still comparing a few options", "objection_type": "TIMING", "sentiment": "NEGATIVE", "subtype": "comparison_shopping"}
+{"utterance": "this isn't really the right time of year for me", "objection_type": "TIMING", "sentiment": "NEGATIVE", "subtype": "season_wrong"}
+{"utterance": "maybe later in the year", "objection_type": "TIMING", "sentiment": "NEGATIVE", "subtype": "season_wrong"}
+{"utterance": "i'm super busy right now can we do this another time", "objection_type": "TIMING", "sentiment": "NEGATIVE", "subtype": "busy"}
+{"utterance": "actually i'm in the middle of something", "objection_type": "TIMING", "sentiment": "NEGATIVE", "subtype": "busy"}
+{"utterance": "now's not a good time", "objection_type": "TIMING", "sentiment": "NEGATIVE", "subtype": "busy"}
+{"utterance": "i need to sleep on it", "objection_type": "TIMING", "sentiment": "NEGATIVE", "subtype": "not_now"}
+{"utterance": "i'll get back to you", "objection_type": "TIMING", "sentiment": "NEGATIVE", "subtype": "not_now"}
+{"utterance": "let me look at a few more options first", "objection_type": "TIMING", "sentiment": "NEGATIVE", "subtype": "comparison_shopping"}
+{"utterance": "i want to check what other brands are doing", "objection_type": "TIMING", "sentiment": "NEGATIVE", "subtype": "comparison_shopping"}
+{"utterance": "we discuss big purchases as a couple", "objection_type": "TIMING", "sentiment": "NEGATIVE", "subtype": "spouse_decision"}
+{"utterance": "i never buy anything on impulse", "objection_type": "TIMING", "sentiment": "NEGATIVE", "subtype": "not_now"}
+{"utterance": "definitely waiting for prime day or something", "objection_type": "TIMING", "sentiment": "NEGATIVE", "subtype": "wait_for_sale"}
+{"utterance": "maybe next month would be better", "objection_type": "TIMING", "sentiment": "NEUTRAL", "subtype": "not_now"}
+{"utterance": "when's a good deadline to decide by", "objection_type": "TIMING", "sentiment": "NEUTRAL", "subtype": "info_seek"}
+{"utterance": "do you have these in stock for a while", "objection_type": "TIMING", "sentiment": "NEUTRAL", "subtype": "info_seek"}
+{"utterance": "i was planning to buy in a few weeks", "objection_type": "TIMING", "sentiment": "NEUTRAL", "subtype": "not_now"}
+{"utterance": "is there a deadline on this offer", "objection_type": "TIMING", "sentiment": "NEUTRAL", "subtype": "info_seek"}
+{"utterance": "how long are these on sale for", "objection_type": "TIMING", "sentiment": "NEUTRAL", "subtype": "info_seek"}
+{"utterance": "i'll probably decide by next week", "objection_type": "TIMING", "sentiment": "NEUTRAL", "subtype": "not_now"}
+{"utterance": "is the price the same if i buy later", "objection_type": "TIMING", "sentiment": "NEUTRAL", "subtype": "info_seek"}
+{"utterance": "what if i wait a few days to think", "objection_type": "TIMING", "sentiment": "NEUTRAL", "subtype": "not_now"}
+{"utterance": "should i buy now or later", "objection_type": "TIMING", "sentiment": "NEUTRAL", "subtype": "not_now"}
+{"utterance": "yeah let's do this now actually", "objection_type": "TIMING", "sentiment": "POSITIVE", "subtype": "ready_now"}
+{"utterance": "i was going to buy this anyway today", "objection_type": "TIMING", "sentiment": "POSITIVE", "subtype": "ready_now"}
+{"utterance": "perfect timing actually", "objection_type": "TIMING", "sentiment": "POSITIVE", "subtype": "ready_now"}
+{"utterance": "i need it as soon as possible", "objection_type": "TIMING", "sentiment": "POSITIVE", "subtype": "ready_now"}
+{"utterance": "can i get it shipped overnight", "objection_type": "TIMING", "sentiment": "POSITIVE", "subtype": "ready_now"}
+{"utterance": "i don't want to wait i'll just get it now", "objection_type": "TIMING", "sentiment": "POSITIVE", "subtype": "ready_now"}
+{"utterance": "okay i'm ready let's do it", "objection_type": "TIMING", "sentiment": "POSITIVE", "subtype": "ready_now"}
+{"utterance": "i was about to order anyway", "objection_type": "TIMING", "sentiment": "POSITIVE", "subtype": "ready_now"}
+{"utterance": "great timing this is exactly what i needed", "objection_type": "TIMING", "sentiment": "POSITIVE", "subtype": "ready_now"}
+{"utterance": "let's just do it today", "objection_type": "TIMING", "sentiment": "POSITIVE", "subtype": "ready_now"}
+{"utterance": "i don't really understand what this does", "objection_type": "CONFUSION", "sentiment": "NEGATIVE", "subtype": "feature_unclear"}
+{"utterance": "wait what does that even mean", "objection_type": "CONFUSION", "sentiment": "NEGATIVE", "subtype": "feature_unclear"}
+{"utterance": "i'm lost can you say that again", "objection_type": "CONFUSION", "sentiment": "NEGATIVE", "subtype": "feature_unclear"}
+{"utterance": "this is kind of confusing", "objection_type": "CONFUSION", "sentiment": "NEGATIVE", "subtype": "feature_unclear"}
+{"utterance": "how does this actually work though", "objection_type": "CONFUSION", "sentiment": "NEGATIVE", "subtype": "how_works"}
+{"utterance": "i'm not really following honestly", "objection_type": "CONFUSION", "sentiment": "NEGATIVE", "subtype": "feature_unclear"}
+{"utterance": "what's the difference between this and the other one", "objection_type": "CONFUSION", "sentiment": "NEGATIVE", "subtype": "comparison_unclear"}
+{"utterance": "how is it different from the cheaper version", "objection_type": "CONFUSION", "sentiment": "NEGATIVE", "subtype": "comparison_unclear"}
+{"utterance": "will it even fit in my space", "objection_type": "CONFUSION", "sentiment": "NEGATIVE", "subtype": "fit_size"}
+{"utterance": "i don't know what size i need", "objection_type": "CONFUSION", "sentiment": "NEGATIVE", "subtype": "fit_size"}
+{"utterance": "this is more complicated than i thought", "objection_type": "CONFUSION", "sentiment": "NEGATIVE", "subtype": "feature_unclear"}
+{"utterance": "i don't know what half of those features even mean", "objection_type": "CONFUSION", "sentiment": "NEGATIVE", "subtype": "feature_unclear"}
+{"utterance": "this is way too technical for me", "objection_type": "CONFUSION", "sentiment": "NEGATIVE", "subtype": "feature_unclear"}
+{"utterance": "i can't tell which model i should get", "objection_type": "CONFUSION", "sentiment": "NEGATIVE", "subtype": "comparison_unclear"}
+{"utterance": "do i actually need all those features", "objection_type": "CONFUSION", "sentiment": "NEGATIVE", "subtype": "feature_unclear"}
+{"utterance": "i'm not sure how to set it up", "objection_type": "CONFUSION", "sentiment": "NEGATIVE", "subtype": "how_works"}
+{"utterance": "would it work for my situation though", "objection_type": "CONFUSION", "sentiment": "NEGATIVE", "subtype": "feature_unclear"}
+{"utterance": "wait can you back up and explain that part", "objection_type": "CONFUSION", "sentiment": "NEGATIVE", "subtype": "feature_unclear"}
+{"utterance": "that doesn't really make sense to me", "objection_type": "CONFUSION", "sentiment": "NEGATIVE", "subtype": "feature_unclear"}
+{"utterance": "honestly i'm just confused about the whole thing", "objection_type": "CONFUSION", "sentiment": "NEGATIVE", "subtype": "feature_unclear"}
+{"utterance": "can you explain the main features again", "objection_type": "CONFUSION", "sentiment": "NEUTRAL", "subtype": "feature_unclear"}
+{"utterance": "what does that feature do exactly", "objection_type": "CONFUSION", "sentiment": "NEUTRAL", "subtype": "feature_unclear"}
+{"utterance": "how would i actually use this", "objection_type": "CONFUSION", "sentiment": "NEUTRAL", "subtype": "how_works"}
+{"utterance": "what size should i get for my room", "objection_type": "CONFUSION", "sentiment": "NEUTRAL", "subtype": "fit_size"}
+{"utterance": "what color options are there", "objection_type": "CONFUSION", "sentiment": "NEUTRAL", "subtype": "feature_unclear"}
+{"utterance": "tell me about the differences between the models", "objection_type": "CONFUSION", "sentiment": "NEUTRAL", "subtype": "comparison_unclear"}
+{"utterance": "what comes in the box", "objection_type": "CONFUSION", "sentiment": "NEUTRAL", "subtype": "feature_unclear"}
+{"utterance": "is assembly required", "objection_type": "CONFUSION", "sentiment": "NEUTRAL", "subtype": "how_works"}
+{"utterance": "how does the installation work", "objection_type": "CONFUSION", "sentiment": "NEUTRAL", "subtype": "how_works"}
+{"utterance": "what's the dimensions on this thing", "objection_type": "CONFUSION", "sentiment": "NEUTRAL", "subtype": "fit_size"}
+{"utterance": "that sounds great i'm interested", "objection_type": "POSITIVE_SIGNAL", "sentiment": "POSITIVE", "subtype": "interested"}
+{"utterance": "wow that actually sounds perfect", "objection_type": "POSITIVE_SIGNAL", "sentiment": "POSITIVE", "subtype": "interested"}
+{"utterance": "okay i'm in let's do it", "objection_type": "POSITIVE_SIGNAL", "sentiment": "POSITIVE", "subtype": "ready_to_buy"}
+{"utterance": "yeah let's go ahead with it", "objection_type": "POSITIVE_SIGNAL", "sentiment": "POSITIVE", "subtype": "ready_to_buy"}
+{"utterance": "i'll take it", "objection_type": "POSITIVE_SIGNAL", "sentiment": "POSITIVE", "subtype": "ready_to_buy"}
+{"utterance": "sign me up", "objection_type": "POSITIVE_SIGNAL", "sentiment": "POSITIVE", "subtype": "ready_to_buy"}
+{"utterance": "how does delivery work", "objection_type": "POSITIVE_SIGNAL", "sentiment": "POSITIVE", "subtype": "asking_logistics"}
+{"utterance": "when can i actually get it", "objection_type": "POSITIVE_SIGNAL", "sentiment": "POSITIVE", "subtype": "asking_logistics"}
+{"utterance": "what colors do you have available", "objection_type": "POSITIVE_SIGNAL", "sentiment": "POSITIVE", "subtype": "asking_logistics"}
+{"utterance": "do you take credit card", "objection_type": "POSITIVE_SIGNAL", "sentiment": "POSITIVE", "subtype": "asking_logistics"}
+{"utterance": "what's the next step", "objection_type": "POSITIVE_SIGNAL", "sentiment": "POSITIVE", "subtype": "asking_logistics"}
+{"utterance": "exactly what i was looking for", "objection_type": "POSITIVE_SIGNAL", "sentiment": "POSITIVE", "subtype": "interested"}
+{"utterance": "this is awesome", "objection_type": "POSITIVE_SIGNAL", "sentiment": "POSITIVE", "subtype": "compliment"}
+{"utterance": "you guys make a great product", "objection_type": "POSITIVE_SIGNAL", "sentiment": "POSITIVE", "subtype": "compliment"}
+{"utterance": "yeah that makes sense to me", "objection_type": "POSITIVE_SIGNAL", "sentiment": "POSITIVE", "subtype": "agreement"}
+{"utterance": "you're right that's a fair point", "objection_type": "POSITIVE_SIGNAL", "sentiment": "POSITIVE", "subtype": "agreement"}
+{"utterance": "i totally agree with that", "objection_type": "POSITIVE_SIGNAL", "sentiment": "POSITIVE", "subtype": "agreement"}
+{"utterance": "good point i didn't think of it that way", "objection_type": "POSITIVE_SIGNAL", "sentiment": "POSITIVE", "subtype": "agreement"}
+{"utterance": "this really is what i need", "objection_type": "POSITIVE_SIGNAL", "sentiment": "POSITIVE", "subtype": "interested"}
+{"utterance": "that's exactly the feature i was hoping for", "objection_type": "POSITIVE_SIGNAL", "sentiment": "POSITIVE", "subtype": "interested"}
+{"utterance": "alright let's move forward", "objection_type": "POSITIVE_SIGNAL", "sentiment": "POSITIVE", "subtype": "ready_to_buy"}
+{"utterance": "i'll go for it", "objection_type": "POSITIVE_SIGNAL", "sentiment": "POSITIVE", "subtype": "ready_to_buy"}
+{"utterance": "let's wrap this up i want to order", "objection_type": "POSITIVE_SIGNAL", "sentiment": "POSITIVE", "subtype": "ready_to_buy"}
+{"utterance": "what payment methods do you take", "objection_type": "POSITIVE_SIGNAL", "sentiment": "POSITIVE", "subtype": "asking_logistics"}
+{"utterance": "can you ship to my address", "objection_type": "POSITIVE_SIGNAL", "sentiment": "POSITIVE", "subtype": "asking_logistics"}
+{"utterance": "okay tell me more", "objection_type": "POSITIVE_SIGNAL", "sentiment": "NEUTRAL", "subtype": "interested"}
+{"utterance": "go on", "objection_type": "POSITIVE_SIGNAL", "sentiment": "NEUTRAL", "subtype": "interested"}
+{"utterance": "interesting tell me about that", "objection_type": "POSITIVE_SIGNAL", "sentiment": "NEUTRAL", "subtype": "interested"}
+{"utterance": "what else does it do", "objection_type": "POSITIVE_SIGNAL", "sentiment": "NEUTRAL", "subtype": "interested"}
+{"utterance": "alright keep going", "objection_type": "POSITIVE_SIGNAL", "sentiment": "NEUTRAL", "subtype": "interested"}
+{"utterance": "yeah and", "objection_type": "POSITIVE_SIGNAL", "sentiment": "NEUTRAL", "subtype": "interested"}
+{"utterance": "okay sounds good so far", "objection_type": "POSITIVE_SIGNAL", "sentiment": "NEUTRAL", "subtype": "interested"}
+{"utterance": "i'm listening", "objection_type": "POSITIVE_SIGNAL", "sentiment": "NEUTRAL", "subtype": "interested"}
+{"utterance": "what other features should i know about", "objection_type": "POSITIVE_SIGNAL", "sentiment": "NEUTRAL", "subtype": "interested"}
+{"utterance": "okay continue", "objection_type": "POSITIVE_SIGNAL", "sentiment": "NEUTRAL", "subtype": "interested"}
+{"utterance": "hmm", "objection_type": "NEUTRAL", "sentiment": "NEUTRAL", "subtype": "backchannel"}
+{"utterance": "i see", "objection_type": "NEUTRAL", "sentiment": "NEUTRAL", "subtype": "backchannel"}
+{"utterance": "okay", "objection_type": "NEUTRAL", "sentiment": "NEUTRAL", "subtype": "acknowledgment"}
+{"utterance": "uh huh", "objection_type": "NEUTRAL", "sentiment": "NEUTRAL", "subtype": "backchannel"}
+{"utterance": "right", "objection_type": "NEUTRAL", "sentiment": "NEUTRAL", "subtype": "acknowledgment"}
+{"utterance": "got it", "objection_type": "NEUTRAL", "sentiment": "NEUTRAL", "subtype": "acknowledgment"}
+{"utterance": "mmhmm", "objection_type": "NEUTRAL", "sentiment": "NEUTRAL", "subtype": "backchannel"}
+{"utterance": "alright", "objection_type": "NEUTRAL", "sentiment": "NEUTRAL", "subtype": "acknowledgment"}
+{"utterance": "sure", "objection_type": "NEUTRAL", "sentiment": "NEUTRAL", "subtype": "acknowledgment"}
+{"utterance": "yeah", "objection_type": "NEUTRAL", "sentiment": "NEUTRAL", "subtype": "acknowledgment"}
+{"utterance": "okay yeah", "objection_type": "NEUTRAL", "sentiment": "NEUTRAL", "subtype": "acknowledgment"}
+{"utterance": "i hear you", "objection_type": "NEUTRAL", "sentiment": "NEUTRAL", "subtype": "backchannel"}
+{"utterance": "noted", "objection_type": "NEUTRAL", "sentiment": "NEUTRAL", "subtype": "acknowledgment"}
+{"utterance": "fair enough", "objection_type": "NEUTRAL", "sentiment": "NEUTRAL", "subtype": "acknowledgment"}
+{"utterance": "that's fine", "objection_type": "NEUTRAL", "sentiment": "NEUTRAL", "subtype": "acknowledgment"}
+{"utterance": "okay so", "objection_type": "NEUTRAL", "sentiment": "NEUTRAL", "subtype": "backchannel"}
+{"utterance": "and", "objection_type": "NEUTRAL", "sentiment": "NEUTRAL", "subtype": "backchannel"}
+{"utterance": "wait", "objection_type": "NEUTRAL", "sentiment": "NEUTRAL", "subtype": "backchannel"}
+{"utterance": "huh", "objection_type": "NEUTRAL", "sentiment": "NEUTRAL", "subtype": "backchannel"}
+{"utterance": "okay i hear you", "objection_type": "NEUTRAL", "sentiment": "NEUTRAL", "subtype": "acknowledgment"}
