@@ -18,14 +18,61 @@ def _m(otype: str, sentiment: str, score: float, subtype: str | None = None) -> 
     )
 
 
+def test_strict_win_subtype_falls_back_to_none_when_top_has_no_subtype():
+    matches = [_m("CONFUSION", "NEGATIVE", 0.91, subtype=None)]
+    result = vote(matches)
+    assert result is not None
+    assert result.method == "strict"
+    assert result.subtype is None
+
+
+def test_consensus_subtype_falls_back_to_top1_when_no_majority():
+    # All three subtypes differ → fall back to top-1's subtype
+    matches = [
+        _m("PRICE", "NEGATIVE", 0.81, subtype="too_expensive"),
+        _m("PRICE", "NEGATIVE", 0.80, subtype="found_cheaper"),
+        _m("PRICE", "NEGATIVE", 0.79, subtype="budget"),
+    ]
+    result = vote(matches)
+    assert result is not None
+    assert result.method == "consensus"
+    assert result.subtype == "too_expensive"  # top-1 wins as tiebreaker
+
+
+def test_consensus_subtype_handles_missing_subtypes():
+    # No match has a subtype → vote returns None for subtype, label still wins
+    matches = [
+        _m("TRUST", "NEUTRAL", 0.81, subtype=None),
+        _m("TRUST", "NEUTRAL", 0.80, subtype=None),
+        _m("TRUST", "NEUTRAL", 0.79, subtype=None),
+    ]
+    result = vote(matches)
+    assert result is not None
+    assert result.method == "consensus"
+    assert result.subtype is None
+
+
+def test_consensus_subtype_picks_majority_even_when_top1_differs():
+    # Top-1 says 'budget' but the other two agree on 'too_expensive' → majority wins
+    matches = [
+        _m("PRICE", "NEGATIVE", 0.81, subtype="budget"),
+        _m("PRICE", "NEGATIVE", 0.80, subtype="too_expensive"),
+        _m("PRICE", "NEGATIVE", 0.79, subtype="too_expensive"),
+    ]
+    result = vote(matches)
+    assert result is not None
+    assert result.method == "consensus"
+    assert result.subtype == "too_expensive"
+
+
 def test_vote_returns_none_for_empty_matches():
     assert vote([]) is None
 
 
 def test_strict_win_when_top1_above_strict_threshold():
     matches = [
-        _m("PRICE", "NEGATIVE", 0.92),
-        _m("TIMING", "NEGATIVE", 0.55),
+        _m("PRICE", "NEGATIVE", 0.92, subtype="too_expensive"),
+        _m("TIMING", "NEGATIVE", 0.55, subtype="not_now"),
         _m("PRICE", "NEUTRAL", 0.50),
     ]
     result = vote(matches)
@@ -34,13 +81,14 @@ def test_strict_win_when_top1_above_strict_threshold():
     assert result.sentiment == "NEGATIVE"
     assert result.method == "strict"
     assert result.confidence == 0.92
+    assert result.subtype == "too_expensive"  # strict win uses top-1's subtype
 
 
 def test_consensus_win_when_top3_agree_above_confidence_threshold():
     matches = [
-        _m("PRICE", "NEGATIVE", 0.81),
-        _m("PRICE", "NEGATIVE", 0.80),
-        _m("PRICE", "NEGATIVE", 0.79),
+        _m("PRICE", "NEGATIVE", 0.81, subtype="too_expensive"),
+        _m("PRICE", "NEGATIVE", 0.80, subtype="too_expensive"),
+        _m("PRICE", "NEGATIVE", 0.79, subtype="budget"),
         _m("TRUST", "NEGATIVE", 0.40),
     ]
     result = vote(matches)
@@ -49,6 +97,7 @@ def test_consensus_win_when_top3_agree_above_confidence_threshold():
     assert result.sentiment == "NEGATIVE"
     assert result.method == "consensus"
     assert abs(result.confidence - 0.80) < 1e-6
+    assert result.subtype == "too_expensive"  # 2 of 3 agree → consensus subtype
 
 
 def test_no_vote_when_top1_below_strict_and_top3_disagree():

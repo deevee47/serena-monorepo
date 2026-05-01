@@ -6,10 +6,13 @@ Mode is set by `settings.classifier_mode`:
                 comparison. Use this during initial rollout to validate accuracy.
   - "llm"       Original behavior — LLM only. Kill switch for instant rollback.
 
-Public API is unchanged: `classify_objection(...) -> (type, sentiment, confidence)`.
+Returns a `Classification(objection_type, sentiment, confidence, subtype)`.
+Subtype is only populated by the Pinecone path (B-2) — the LLM fallback leaves
+it None.
 """
 
 import asyncio
+from typing import NamedTuple
 
 from openai import (
     APIConnectionError,
@@ -24,6 +27,13 @@ from app.config.settings import settings
 from app.services.objection_index import classify_via_pinecone
 from app.utils.errors import ClassificationError
 from app.utils.logger import get_logger
+
+
+class Classification(NamedTuple):
+    objection_type: str
+    sentiment: str
+    confidence: float
+    subtype: str | None
 
 FEW_SHOT_EXAMPLES = [
     ("That's too expensive for me", "PRICE NEGATIVE"),
@@ -44,8 +54,7 @@ VALID_TYPES = {"PRICE", "TRUST", "CONFUSION", "TIMING", "POSITIVE_SIGNAL", "NEUT
 VALID_SENTIMENTS = {"POSITIVE", "NEGATIVE", "NEUTRAL"}
 
 
-async def classify_objection(utterance: str, stage: str, score: int, call_id: str) -> tuple[str, str, float]:
-    """Returns (objection_type, sentiment, confidence)."""
+async def classify_objection(utterance: str, stage: str, score: int, call_id: str) -> Classification:
     log = get_logger(call_id)
     mode = settings.classifier_mode
 
@@ -59,13 +68,13 @@ async def classify_objection(utterance: str, stage: str, score: int, call_id: st
         pinecone_result = await pinecone_task
         agreement = (
             pinecone_result is not None
-            and pinecone_result.objection_type == llm_result[0]
-            and pinecone_result.sentiment == llm_result[1]
+            and pinecone_result.objection_type == llm_result.objection_type
+            and pinecone_result.sentiment == llm_result.sentiment
         )
         log.info(
             "classifier_shadow",
             utterance=utterance[:80],
-            llm=llm_result,
+            llm=llm_result._asdict(),
             pinecone=pinecone_result._asdict() if pinecone_result else None,
             agreement=agreement,
         )
@@ -80,8 +89,14 @@ async def classify_objection(utterance: str, stage: str, score: int, call_id: st
             label=(pinecone_result.objection_type, pinecone_result.sentiment),
             confidence=round(pinecone_result.confidence, 3),
             method=pinecone_result.method,
+            subtype=pinecone_result.subtype,
         )
-        return pinecone_result.objection_type, pinecone_result.sentiment, pinecone_result.confidence
+        return Classification(
+            objection_type=pinecone_result.objection_type,
+            sentiment=pinecone_result.sentiment,
+            confidence=pinecone_result.confidence,
+            subtype=pinecone_result.subtype,
+        )
 
     log.info("classifier_pinecone_miss_falling_back_to_llm", utterance=utterance[:80])
     return await _classify_with_llm(utterance, call_id)
@@ -100,7 +115,7 @@ async def _safe_classify_via_pinecone(utterance: str, call_id: str):
         return None
 
 
-async def _classify_with_llm(utterance: str, call_id: str) -> tuple[str, str, float]:
+async def _classify_with_llm(utterance: str, call_id: str) -> Classification:
     log = get_logger(call_id)
     client = AsyncOpenAI(api_key=settings.llm_api_key)
 
@@ -151,4 +166,4 @@ async def _classify_with_llm(utterance: str, call_id: str) -> tuple[str, str, fl
     sentiment = parts[1] if len(parts) >= 2 and parts[1] in VALID_SENTIMENTS else "NEUTRAL"
     confidence = 1.0 if objection_type != "NEUTRAL" or raw == "NEUTRAL NEUTRAL" else 0.5
 
-    return objection_type, sentiment, confidence
+    return Classification(objection_type, sentiment, confidence, subtype=None)

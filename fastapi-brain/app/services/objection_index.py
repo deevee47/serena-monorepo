@@ -49,6 +49,7 @@ class VoteResult(NamedTuple):
     sentiment: str
     confidence: float
     method: str  # 'strict' | 'consensus'
+    subtype: str | None  # B-2: fine-grained sub-type (e.g. PRICE 'too_expensive')
 
 
 async def query_objections(utterance: str, top_k: int = 5) -> list[Match]:
@@ -77,7 +78,7 @@ def vote(matches: list[Match]) -> VoteResult | None:
 
     top = matches[0]
     if top.score >= settings.classifier_top1_strict_threshold:
-        return VoteResult(top.objection_type, top.sentiment, top.score, "strict")
+        return VoteResult(top.objection_type, top.sentiment, top.score, "strict", top.subtype)
 
     top3 = matches[:3]
     labels = Counter((m.objection_type, m.sentiment) for m in top3)
@@ -85,9 +86,24 @@ def vote(matches: list[Match]) -> VoteResult | None:
     if count == len(top3):
         avg_score = sum(m.score for m in top3) / len(top3)
         if avg_score >= settings.classifier_confidence_threshold:
-            return VoteResult(label[0], label[1], avg_score, "consensus")
+            subtype = _consensus_subtype(top3, fallback=top.subtype)
+            return VoteResult(label[0], label[1], avg_score, "consensus", subtype)
 
     return None
+
+
+def _consensus_subtype(matches: list[Match], fallback: str | None) -> str | None:
+    """Pick the most-common subtype from `matches`. If subtypes don't agree
+    (or none are present), fall back to the highest-scoring match's subtype."""
+    subtypes = [m.subtype for m in matches if m.subtype]
+    if not subtypes:
+        return fallback
+    counts = Counter(subtypes)
+    top_subtype, top_count = counts.most_common(1)[0]
+    # Only trust consensus if at least 2 of the 3 matches agree on the subtype.
+    if top_count >= 2:
+        return top_subtype
+    return fallback
 
 
 async def classify_via_pinecone(utterance: str, call_id: str) -> VoteResult | None:
