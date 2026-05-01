@@ -18,6 +18,13 @@ const envSchema = z.object({
   DATABASE_URL: z.string().min(1),
   REDIS_URL: z.string().default('redis://localhost:6379'),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+  // When true, processTranscript routes through the new pipeline:
+  //   classify → decide → generate-tactic
+  // When false (default), uses the legacy /generate path with the persona prompt.
+  USE_TACTIC_PIPELINE: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
 });
 
 const result = envSchema.safeParse(process.env);
