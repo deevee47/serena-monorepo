@@ -9,13 +9,16 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.services import classifier as classifier_module
+from app.services.classifier import Classification
 from app.services.objection_index import VoteResult
 
 
 @pytest.fixture
 def mock_llm():
     with patch.object(
-        classifier_module, "_classify_with_llm", new=AsyncMock(return_value=("PRICE", "NEGATIVE", 1.0))
+        classifier_module,
+        "_classify_with_llm",
+        new=AsyncMock(return_value=Classification("PRICE", "NEGATIVE", 1.0, None)),
     ) as m:
         yield m
 
@@ -25,7 +28,7 @@ def mock_pinecone_hit():
     with patch.object(
         classifier_module,
         "_safe_classify_via_pinecone",
-        new=AsyncMock(return_value=VoteResult("TIMING", "NEUTRAL", 0.91, "strict")),
+        new=AsyncMock(return_value=VoteResult("TIMING", "NEUTRAL", 0.91, "strict", "not_now")),
     ) as m:
         yield m
 
@@ -59,7 +62,7 @@ def shadow_mode():
 @pytest.mark.asyncio
 async def test_llm_mode_only_calls_llm(llm_mode, mock_llm, mock_pinecone_hit):
     result = await classifier_module.classify_objection("anything", "PITCH", 50, "c1")
-    assert result == ("PRICE", "NEGATIVE", 1.0)
+    assert result == Classification("PRICE", "NEGATIVE", 1.0, None)
     mock_llm.assert_awaited_once()
     mock_pinecone_hit.assert_not_called()
 
@@ -67,7 +70,7 @@ async def test_llm_mode_only_calls_llm(llm_mode, mock_llm, mock_pinecone_hit):
 @pytest.mark.asyncio
 async def test_pinecone_mode_uses_pinecone_when_hit(pinecone_mode, mock_llm, mock_pinecone_hit):
     result = await classifier_module.classify_objection("uh that's fine", "PITCH", 50, "c2")
-    assert result == ("TIMING", "NEUTRAL", 0.91)
+    assert result == Classification("TIMING", "NEUTRAL", 0.91, "not_now")
     mock_pinecone_hit.assert_awaited_once()
     mock_llm.assert_not_called()
 
@@ -75,7 +78,7 @@ async def test_pinecone_mode_uses_pinecone_when_hit(pinecone_mode, mock_llm, moc
 @pytest.mark.asyncio
 async def test_pinecone_mode_falls_back_to_llm_on_miss(pinecone_mode, mock_llm, mock_pinecone_miss):
     result = await classifier_module.classify_objection("ambiguous", "OBJECTION", 30, "c3")
-    assert result == ("PRICE", "NEGATIVE", 1.0)
+    assert result == Classification("PRICE", "NEGATIVE", 1.0, None)
     mock_pinecone_miss.assert_awaited_once()
     mock_llm.assert_awaited_once()
 
@@ -84,7 +87,7 @@ async def test_pinecone_mode_falls_back_to_llm_on_miss(pinecone_mode, mock_llm, 
 async def test_shadow_mode_calls_both_returns_llm(shadow_mode, mock_llm, mock_pinecone_hit):
     result = await classifier_module.classify_objection("hmm", "INTRO", 50, "c4")
     # Shadow mode must return LLM result regardless of Pinecone outcome
-    assert result == ("PRICE", "NEGATIVE", 1.0)
+    assert result == Classification("PRICE", "NEGATIVE", 1.0, None)
     mock_llm.assert_awaited_once()
     mock_pinecone_hit.assert_awaited_once()
 
@@ -93,11 +96,12 @@ async def test_shadow_mode_calls_both_returns_llm(shadow_mode, mock_llm, mock_pi
 async def test_shadow_mode_returns_llm_even_when_pinecone_disagrees(
     shadow_mode, mock_llm, mock_pinecone_hit
 ):
-    # mock_llm returns PRICE NEGATIVE; mock_pinecone_hit returns TIMING NEUTRAL.
-    # Disagreement is fine — shadow mode still returns LLM.
+    # mock_llm returns PRICE NEGATIVE / no subtype; mock_pinecone_hit returns
+    # TIMING NEUTRAL / not_now. Disagreement is fine — shadow returns LLM.
     result = await classifier_module.classify_objection("anything", "PITCH", 50, "c5")
-    assert result[0] == "PRICE"
-    assert result[1] == "NEGATIVE"
+    assert result.objection_type == "PRICE"
+    assert result.sentiment == "NEGATIVE"
+    assert result.subtype is None  # LLM never returns a subtype
 
 
 @pytest.mark.asyncio
