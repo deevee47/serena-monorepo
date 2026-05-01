@@ -71,6 +71,23 @@ class AlternativesRequest(BaseModel):
     top_k: int = 3
 
 
+class GenerateTacticRequest(BaseModel):
+    """Tactic-driven generation. Caller has already run /classify and /decide
+    (or chosen a tactic some other way) and is now asking the brain to express
+    that tactic as natural voice speech."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    call_id: str
+    utterance: str  # what the customer just said
+    tactic: str  # one of services/tactics.py Tactic values
+    micro_guidance: str  # the per-tactic guidance from services/tactics.py
+    conversation_history: list[ConversationTurn] = []
+    product_context: ProductContext | None = None
+    alternative_product_context: ProductContext | None = None
+    discount_available: int = 0
+
+
 class DecideRequest(BaseModel):
     """Inputs the rules engine needs to pick a tactic. Built by node-gateway
     from live session state + the latest classifier output."""
