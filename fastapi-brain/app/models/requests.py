@@ -59,6 +59,7 @@ class GenerateResponseRequest(BaseModel):
     objection_type: ObjectionType | None = None
     conversation_history: list[ConversationTurn]
     product_context: ProductContext | None = None
+    alternative_product_context: ProductContext | None = None
 
 
 class AlternativesRequest(BaseModel):
