@@ -7,12 +7,9 @@ import { logger } from './utils/logger.js';
 import { AppError } from './utils/errors.js';
 import { redis } from './lib/redis.js';
 import { BunRedisStore } from './lib/rate-limit-store.js';
-import { initScoringConfig } from './services/scoring.service.js';
 import healthRoutes from './routes/health.js';
 import webhookRoutes from './routes/webhook.js';
 import callsRoutes from './routes/calls.js';
-import vapiLlmRoutes from './routes/vapi-llm.js';
-import adminRoutes from './routes/admin.js';
 
 export async function buildApp() {
   // Verify Redis is reachable before accepting traffic
@@ -22,9 +19,6 @@ export async function buildApp() {
     logger.error({ err }, 'Redis is unavailable — cannot start');
     process.exit(1);
   }
-
-  // Load scoring config from DB; refresh every 5 minutes
-  await initScoringConfig();
 
   const app = Fastify({ loggerInstance: logger });
 
@@ -48,8 +42,6 @@ export async function buildApp() {
   await app.register(healthRoutes);
   await app.register(webhookRoutes);
   await app.register(callsRoutes);
-  await app.register(vapiLlmRoutes);
-  await app.register(adminRoutes);
 
   app.setErrorHandler((error, request, reply) => {
     const callId = (request.headers['x-call-id'] as string | undefined) ?? 'unknown';

@@ -46,8 +46,18 @@ FEW_SHOT_EXAMPLES = [
     ("Maybe next month would be better", "TIMING NEUTRAL"),
     ("That sounds great, I'm interested!", "POSITIVE_SIGNAL POSITIVE"),
     ("Okay, tell me more", "POSITIVE_SIGNAL NEUTRAL"),
+    # Bare confirmations — common after the agent asks an isolating question.
+    # These should map to POSITIVE_SIGNAL POSITIVE so the rules engine treats
+    # them as the customer agreeing with whatever was just asked.
+    ("yes", "POSITIVE_SIGNAL POSITIVE"),
+    ("yeah", "POSITIVE_SIGNAL POSITIVE"),
+    ("yes they will be", "POSITIVE_SIGNAL POSITIVE"),
+    ("yeah it would be", "POSITIVE_SIGNAL POSITIVE"),
+    ("right, exactly", "POSITIVE_SIGNAL POSITIVE"),
+    # Backchannels — pure acknowledgment, no opinion.
     ("Hmm", "NEUTRAL NEUTRAL"),
     ("I see", "NEUTRAL NEUTRAL"),
+    ("okay", "NEUTRAL NEUTRAL"),
 ]
 
 VALID_TYPES = {"PRICE", "TRUST", "CONFUSION", "TIMING", "POSITIVE_SIGNAL", "NEUTRAL"}
