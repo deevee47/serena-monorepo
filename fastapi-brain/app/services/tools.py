@@ -68,6 +68,16 @@ class GetDeliveryEtaArgs(BaseModel):
     product_id: str = Field(description="The product_id (delivery time can vary by warehouse).")
 
 
+class GetAvailableOffersArgs(BaseModel):
+    product_id: str = Field(
+        description=(
+            "The product_id to fetch active promotional offers for. Returns "
+            "BUNDLE offers (buy X with Y for N% off) and QUANTITY offers "
+            "(buy 2+ for N% off) — pre-authorized by the business."
+        ),
+    )
+
+
 # Tool name → its Pydantic args model.
 TOOL_ARG_MODELS: dict[str, type[BaseModel]] = {
     "send_whatsapp_checkout_link": SendCheckoutLinkArgs,
@@ -76,6 +86,7 @@ TOOL_ARG_MODELS: dict[str, type[BaseModel]] = {
     "get_recent_purchases": GetRecentPurchasesArgs,
     "get_review_summary": GetReviewSummaryArgs,
     "get_delivery_eta": GetDeliveryEtaArgs,
+    "get_available_offers": GetAvailableOffersArgs,
 }
 
 ToolName = Literal[
@@ -85,6 +96,7 @@ ToolName = Literal[
     "get_recent_purchases",
     "get_review_summary",
     "get_delivery_eta",
+    "get_available_offers",
 ]
 
 # Side-effect tools end the LLM turn — gateway dispatches, no result back.
@@ -99,6 +111,7 @@ OBSERVATION_TOOLS: set[str] = {
     "get_recent_purchases",
     "get_review_summary",
     "get_delivery_eta",
+    "get_available_offers",
 }
 
 
@@ -188,6 +201,25 @@ OPENAI_TOOLS: list[dict[str, Any]] = [
                 "closing lever (e.g. they need it before a date)."
             ),
             "parameters": GetDeliveryEtaArgs.model_json_schema(),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_available_offers",
+            "description": (
+                "Get the active promotional offers attached to a product — "
+                "BUNDLE offers (buy this with another product for N% off) and "
+                "QUANTITY offers (buy ≥N for N% off). Returns "
+                "{ offers: [{type, discount_percent, short_pitch, "
+                "bundle_product?, min_quantity?}] }. CALL THIS BEFORE giving a "
+                "flat negotiation discount on a price objection — pre-authorized "
+                "offers are stronger than ad-hoc concessions because they "
+                "increase order value, not just margin. If no offers exist or "
+                "none fit the customer's situation, then fall back to the "
+                "discount ladder. Do NOT invent an offer the tool didn't return."
+            ),
+            "parameters": GetAvailableOffersArgs.model_json_schema(),
         },
     },
 ]

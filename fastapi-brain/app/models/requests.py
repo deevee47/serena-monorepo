@@ -112,6 +112,10 @@ class AlternativesRequest(BaseModel):
     exclude_id: str
     current_price: float | None = None
     top_k: int = 3
+    # Soft category filter — restricts cheaper-alternative search to the
+    # same product category. Stops $39 hoodies surfacing as alternatives
+    # to $349 office chairs.
+    category: str | None = None
 
 
 class ConverseRequest(BaseModel):
@@ -129,3 +133,10 @@ class ConverseRequest(BaseModel):
     cart_context: CartContext | None = None
     customer_context: CustomerContext | None = None
     discounts_already_offered: list[int] = []  # e.g. [] | [5] | [5, 10]
+    # Agent identity for the proactive opener. The LLM uses these to introduce
+    # itself naturally on the first turn ("Hi Sarah, this is Alex from ShopEase...").
+    agent_name: str = "Alex"
+    business_name: str = "ShopEase"
+    # The discount the agent can offer up front on the opener as a
+    # call-completion incentive. Defaults to 5%; absolute cap remains 10%.
+    opening_offer_percent: int = 5

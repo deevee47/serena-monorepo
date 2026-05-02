@@ -44,14 +44,30 @@ export default async function callsRoutes(app: FastifyInstance) {
         headers: { Authorization: `Bearer ${config.VAPI_API_KEY}` },
         json: {
           assistantId: config.VAPI_ASSISTANT_ID,
-          customer: { phoneNumber: phone_number },
+          ...(config.VAPI_PHONE_NUMBER_ID
+            ? { phoneNumberId: config.VAPI_PHONE_NUMBER_ID }
+            : {}),
+          customer: { number: phone_number },
           metadata: { product_id, trigger_reason, ...metadata },
         },
       }).json<{ id: string }>();
       vapiCallId = vapiRes.id;
     } catch (err) {
-      request.log.error({ err }, 'Vapi call initiation failed');
-      throw new AppError(502, ErrorCodes.BRAIN_UNREACHABLE, 'Failed to initiate call via Vapi');
+      // Surface the underlying Vapi error so the curl response is debuggable.
+      let vapiBody: unknown = undefined;
+      let vapiStatus: number | undefined;
+      if (typeof err === 'object' && err !== null && 'response' in err) {
+        const resp = (err as { response?: { statusCode?: number; body?: unknown } }).response;
+        vapiStatus = resp?.statusCode;
+        vapiBody = resp?.body;
+      }
+      request.log.error({ err, vapi_status: vapiStatus, vapi_body: vapiBody }, 'Vapi call initiation failed');
+      throw new AppError(
+        502,
+        'VAPI_REJECTED',
+        `Vapi rejected the call (HTTP ${vapiStatus ?? '?'})`,
+        vapiBody,
+      );
     }
 
     await redis.setex(`pending_call:${vapiCallId}`, 60, JSON.stringify({ productId: product_id, triggerReason: trigger_reason }));
