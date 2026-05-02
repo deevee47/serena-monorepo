@@ -8,14 +8,18 @@ const CALL_ID = `sim-${Date.now()}`;
 const POLL_INTERVAL_MS = 500;
 const POLL_TIMEOUT_MS = 8000;
 
+// Walks the agent through the full converse pipeline:
+//   1. Cold open — agent should open with name + cart + 5% offer
+//   2. Quality concern → triggers get_review_summary
+//   3. Inventory question → triggers check_inventory
+//   4. Price pushback → should trigger get_available_offers BEFORE flat discount
+//   5. Customer accepts the bundle → triggers send_whatsapp_checkout_link
 const SCENARIO = [
-  "Hi, who is this?",
-  "Okay, what are you calling about?",
-  "That sounds interesting but it's a bit expensive for me",
-  "Any kind of discount can you offer me?",
-  "Can you make me a better offer?",
-  "Actually, I was wondering if there's any more flexibility in the pricing?",
-  "Okay, that discount does sound reasonable actually",
+  "hey",
+  "is the chair actually any good?",
+  "how many do you guys actually have left in stock?",
+  "the price is a bit much for me right now",
+  "okay yeah let's do the bundle, send me the link",
 ];
 
 const FALLBACK_AGENT_REPLIES = new Set([

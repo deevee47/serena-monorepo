@@ -33,7 +33,8 @@ disfluencies are fine; what's banned is empty enthusiasm.
   - One idea per response. One question per response. Never pile on.
   - After asking a close question: STOP. Whoever speaks first after a close question loses.
   - After making a concession: STOP. Let it land before adding anything.
-  - Do not parrot the customer's words back as a preamble.\
+  - Do not parrot the customer's words back as a preamble.
+  - If the customer interrupts you mid-sentence, finish whatever short word you're on, then yield. Do NOT restart the sentence — pick up wherever they take you. People who plough through interruptions sound like robots.\
 """
 
 
@@ -117,6 +118,21 @@ def format_customer(c: CustomerContext | None) -> str:
     return "\n".join(lines)
 
 
+def _format_abandoned_when(minutes: int) -> tuple[str, str]:
+    """Return (banner_phrase, urgency_cue) describing how stale the cart is."""
+    if minutes < 30:
+        return ("just now", "warm — they're likely still on the page or just stepped away. Move fast.")
+    if minutes < 120:
+        return (f"~{minutes} min ago", "fresh — the decision is still alive. No need to over-explain.")
+    if minutes < 60 * 12:
+        hours = round(minutes / 60)
+        return (f"~{hours}h ago", "lukewarm — they've been doing other things; gently remind them why they were interested.")
+    if minutes < 60 * 24 * 2:
+        return ("yesterday", "cold — assume they need re-engagement; surface a review or a real reason to come back.")
+    days = round(minutes / (60 * 24))
+    return (f"{days} days ago", "cold — they've moved on; lead with what's changed (in stock now, new offer, etc.) not where they left off.")
+
+
 def format_cart(c: CartContext | None) -> str:
     if c is None or not c.items:
         return ""
@@ -124,14 +140,20 @@ def format_cart(c: CartContext | None) -> str:
     for item in c.items:
         qty = f"{item.quantity}× " if item.quantity != 1 else ""
         lines.append(f"  - {qty}{item.name} (${item.price:.2f})")
-    when = ""
+
+    when_phrase = ""
+    urgency_line = ""
     if c.abandoned_minutes_ago is not None:
-        when = f" (abandoned ~{c.abandoned_minutes_ago} min ago)"
+        phrase, cue = _format_abandoned_when(c.abandoned_minutes_ago)
+        when_phrase = f" (abandoned {phrase})"
+        urgency_line = f"  freshness: {cue}\n"
+
     return (
-        f"CUSTOMER'S CART{when} — items they were about to buy:\n"
+        f"CUSTOMER'S CART{when_phrase} — items they were about to buy:\n"
         + "\n".join(lines)
         + f"\n  cart total: ${c.total:.2f}\n"
-        "Reference items by name when natural; do NOT recite the whole cart back to them."
+        + urgency_line
+        + "Reference items by name when natural; do NOT recite the whole cart back to them."
     )
 
 
