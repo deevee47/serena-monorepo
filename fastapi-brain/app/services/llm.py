@@ -71,6 +71,7 @@ _OBSERVATION_TOOL_NAMES: set[str] = {
     "get_recent_purchases",
     "get_review_summary",
     "get_delivery_eta",
+    "get_available_offers",
 }
 
 

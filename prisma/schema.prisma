@@ -47,6 +47,11 @@ enum CartStatus {
   DELETED     // user explicitly emptied
 }
 
+enum OfferType {
+  BUNDLE   // "buy this product with X for Y% off"
+  QUANTITY // "buy N+ of this product for Y% off"
+}
+
 model Customer {
   id                  String          @id @default(uuid())
   phone               String          @unique // E.164
@@ -200,11 +205,39 @@ model Product {
   cartItems CartItem[]
   purchases Purchase[]
   reviews   ProductReview[]
+  offers       Offer[] @relation("ProductOffers")
+  bundleOffers Offer[] @relation("BundleProductOffers")
 
   @@index([category])
   @@index([isActive])
   @@index([category, isActive])
   @@map("products")
+}
+
+model Offer {
+  id              String    @id @default(uuid())
+  productId       String    @map("product_id") // primary product the offer attaches to
+  type            OfferType
+  description     String    // long-form: "Bundle Whey Isolate with Creatine for 5% off both items"
+  shortPitch      String    @map("short_pitch") // phone-friendly: "add Creatine and I can knock 5% off the whole order"
+  discountPercent Int       @map("discount_percent") // 0-25; agent can still go higher only via the flat-discount cap (10%)
+
+  // BUNDLE: complementary product the customer must add to qualify
+  bundleProductId String?   @map("bundle_product_id")
+  // QUANTITY: minimum count of the primary product to qualify
+  minQuantity     Int?      @map("min_quantity")
+
+  isActive        Boolean   @default(true) @map("is_active")
+  validUntil      DateTime? @map("valid_until")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  product       Product  @relation("ProductOffers", fields: [productId], references: [id])
+  bundleProduct Product? @relation("BundleProductOffers", fields: [bundleProductId], references: [id])
+
+  @@index([productId, isActive])
+  @@index([type, isActive])
+  @@map("offers")
 }
 
 model ScoringConfig {
