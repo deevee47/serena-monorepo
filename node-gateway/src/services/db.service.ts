@@ -44,10 +44,20 @@ export async function createCallRecord(session: CallSession): Promise<void> {
 }
 
 export async function updateCallRecord(callId: string, updates: CallEndUpdate): Promise<void> {
-  await prisma.call.update({
-    where: { callId },
-    data: updates,
-  });
+  try {
+    await prisma.call.update({
+      where: { callId },
+      data: updates,
+    });
+  } catch (err) {
+    // P2025: Call row missing — usually an orphan call-end job from a run
+    // where assistant-request never landed. Log and skip rather than retry
+    // forever; there's no row to update and never will be.
+    if (err instanceof Error && 'code' in err && (err as { code: string }).code === 'P2025') {
+      return;
+    }
+    throw err;
+  }
 }
 
 export async function insertCallTurn(callId: string, turn: CallTurnData): Promise<string> {
