@@ -1,0 +1,3 @@
+-- Empty migration. Placeholder: directory was created but the migration was
+-- never authored. Restoring as a no-op so prisma migrate deploy can continue
+-- past it without error. Safe to leave or repurpose later.
