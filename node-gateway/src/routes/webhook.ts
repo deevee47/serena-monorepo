@@ -280,21 +280,11 @@ export default async function webhookRoutes(app: FastifyInstance) {
       }
 
       // ── transcript ─────────────────────────────────────────────────────
+      // Under Custom LLM mode (the supported flow), every turn is handled by
+      // /vapi-llm/chat/completions. The transcript event arrives here as
+      // well, but we ignore it — processing it would duplicate every
+      // call_turn row and run the brain twice per turn.
       if (type === 'transcript') {
-        const msg = event.message as {
-          role?: string;
-          transcriptType?: string;
-          transcript?: string;
-        };
-        if (msg.role === 'user' && msg.transcriptType === 'final' && msg.transcript) {
-          const utterance = msg.transcript;
-          const existing = callLocks.get(callId) ?? Promise.resolve();
-          const next = existing.then(() => processTranscript(callId, utterance));
-          callLocks.set(
-            callId,
-            next.catch(() => {}),
-          );
-        }
         return reply.send({});
       }
 
