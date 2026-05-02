@@ -1,6 +1,11 @@
 import { Worker } from 'bullmq';
 import { logger } from './utils/logger.js';
-import { updateCallRecord, updateCallTurnAnalytics } from './services/db.service.js';
+import {
+  updateCallRecord,
+  updateCallTurnAnalytics,
+  incrementCustomerCallsCount,
+  getToolDispatchSummary,
+} from './services/db.service.js';
 import { deleteSession } from './services/session.service.js';
 import { classifyObjection } from './services/brain.service.js';
 import {
@@ -21,7 +26,7 @@ logger.info('BullMQ workers starting');
 const callEndWorker = new Worker<CallEndJobData>(
   'call-end-queue',
   async (job) => {
-    const { callId, outcome, finalScore, discountGiven, stageReached, durationSeconds } = job.data;
+    const { callId, outcome, finalScore, discountGiven, stageReached, durationSeconds, phoneNumber } = job.data;
     const log = logger.child({ call_id: callId, job_id: job.id });
 
     await updateCallRecord(callId, {
@@ -33,8 +38,28 @@ const callEndWorker = new Worker<CallEndJobData>(
       durationSeconds,
     });
 
+    // Best-effort: bump the customer's prior_calls_count + summarize which
+    // side-effect tools fired. Either failing should not crash the worker.
+    let toolSummary: Record<string, number> = {};
+    try {
+      [, toolSummary] = await Promise.all([
+        incrementCustomerCallsCount(phoneNumber),
+        getToolDispatchSummary(callId),
+      ]);
+    } catch (err) {
+      log.warn({ err }, 'priorCallsCount/toolSummary post-processing failed');
+    }
+
     await deleteSession(callId);
-    log.info({ outcome, finalScore }, 'call-end job complete');
+    log.info(
+      {
+        outcome,
+        finalScore,
+        tool_dispatch_summary: toolSummary,
+        checkout_fired: (toolSummary['send_whatsapp_checkout_link'] ?? 0) > 0,
+      },
+      'call-end job complete',
+    );
   },
   { connection: redisConnection },
 );
