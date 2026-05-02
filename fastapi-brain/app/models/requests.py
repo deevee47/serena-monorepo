@@ -116,6 +116,10 @@ class AlternativesRequest(BaseModel):
     # same product category. Stops $39 hoodies surfacing as alternatives
     # to $349 office chairs.
     category: str | None = None
+    # Direction: 'cheaper' returns one alt below current_price (default
+    # behavior). 'premium' returns one alt strictly ABOVE current_price —
+    # used to anchor the current product as the right-sized choice.
+    direction: str = "cheaper"
 
 
 class ConverseRequest(BaseModel):
@@ -130,6 +134,7 @@ class ConverseRequest(BaseModel):
     conversation_history: list[ConversationTurn] = []
     product_context: ProductContext | None = None
     alternative_product_context: ProductContext | None = None
+    premium_product_context: ProductContext | None = None
     cart_context: CartContext | None = None
     customer_context: CustomerContext | None = None
     discounts_already_offered: list[int] = []  # e.g. [] | [5] | [5, 10]

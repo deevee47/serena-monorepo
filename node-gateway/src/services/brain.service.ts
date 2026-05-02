@@ -61,6 +61,7 @@ export type ConverseRequest = {
   conversation_history?: BrainConversationTurn[];
   product_context?: ProductContext | null;
   alternative_product_context?: ProductContext | null;
+  premium_product_context?: ProductContext | null;
   cart_context?: CartContextPayload | null;
   discounts_already_offered?: number[];
 };
@@ -82,6 +83,7 @@ export type AlternativesRequest = {
   current_price?: number;
   top_k?: number;
   category?: string;
+  direction?: 'cheaper' | 'premium';
 };
 
 export type AlternativesResponse = {
