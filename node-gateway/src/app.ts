@@ -10,6 +10,8 @@ import { BunRedisStore } from './lib/rate-limit-store.js';
 import healthRoutes from './routes/health.js';
 import webhookRoutes from './routes/webhook.js';
 import callsRoutes from './routes/calls.js';
+import vapiLlmRoutes from './routes/vapi-llm.js';
+import { loadCatalog } from './services/product.service.js';
 
 export async function buildApp() {
   // Verify Redis is reachable before accepting traffic
@@ -18,6 +20,15 @@ export async function buildApp() {
   } catch (err) {
     logger.error({ err }, 'Redis is unavailable — cannot start');
     process.exit(1);
+  }
+
+  // Load the product catalog from Postgres before serving requests. Empty
+  // catalog is non-fatal — the gateway still boots, calls just won't have
+  // product context until a re-seed + restart.
+  try {
+    await loadCatalog();
+  } catch (err) {
+    logger.warn({ err }, 'Failed to load product catalog at startup — continuing with empty catalog');
   }
 
   const app = Fastify({ loggerInstance: logger });
@@ -42,6 +53,7 @@ export async function buildApp() {
   await app.register(healthRoutes);
   await app.register(webhookRoutes);
   await app.register(callsRoutes);
+  await app.register(vapiLlmRoutes);
 
   app.setErrorHandler((error, request, reply) => {
     const callId = (request.headers['x-call-id'] as string | undefined) ?? 'unknown';
@@ -49,7 +61,11 @@ export async function buildApp() {
 
     if (error instanceof AppError) {
       return reply.status(error.statusCode).send({
-        error: { code: error.code, message: error.message },
+        error: {
+          code: error.code,
+          message: error.message,
+          ...(error.details !== undefined ? { details: error.details } : {}),
+        },
       });
     }
 
