@@ -35,6 +35,7 @@ def _build_inputs(body: ConverseRequest) -> tuple[str, list[dict]]:
     system_prompt = build_converse_system_prompt(
         product_context=body.product_context,
         alternative_product_context=body.alternative_product_context,
+        premium_product_context=body.premium_product_context,
         cart_context=body.cart_context,
         customer_context=body.customer_context,
         discounts_already_offered=body.discounts_already_offered,

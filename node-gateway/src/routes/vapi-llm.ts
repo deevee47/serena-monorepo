@@ -127,15 +127,17 @@ export default async function vapiLlmRoutes(app: FastifyInstance) {
       const productContext = product ? toProductContext(product) : null;
 
       let alternativeContext = null;
+      let premiumContext = null;
       if (product) {
-        try {
-          alternativeContext = await findAlternativeProduct(
-            session.currentProductId,
-            'PRICE',
-          );
-        } catch (err) {
-          log.warn({ err }, 'alternative product lookup failed (non-fatal)');
-        }
+        // Cheaper + premium in parallel — both feed the prompt's anchor pattern.
+        const [cheaperRes, premiumRes] = await Promise.allSettled([
+          findAlternativeProduct(session.currentProductId, 'PRICE'),
+          findAlternativeProduct(session.currentProductId, 'PREMIUM'),
+        ]);
+        if (cheaperRes.status === 'fulfilled') alternativeContext = cheaperRes.value;
+        else log.warn({ err: cheaperRes.reason }, 'cheaper alt lookup failed (non-fatal)');
+        if (premiumRes.status === 'fulfilled') premiumContext = premiumRes.value;
+        else log.warn({ err: premiumRes.reason }, 'premium alt lookup failed (non-fatal)');
       }
 
       const cartContext: CartContextPayload | null = product
@@ -209,6 +211,7 @@ export default async function vapiLlmRoutes(app: FastifyInstance) {
             conversation_history: history,
             product_context: productContext,
             alternative_product_context: alternativeContext,
+            premium_product_context: premiumContext,
             cart_context: cartContext,
             discounts_already_offered: session.discountsOffered,
           },

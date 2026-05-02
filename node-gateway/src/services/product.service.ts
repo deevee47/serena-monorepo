@@ -58,17 +58,22 @@ export function getCatalogSize(): number {
 
 export async function findAlternativeProduct(
   currentProductId: string,
-  reason: 'PRICE' | 'FEATURE' | 'CATEGORY',
+  reason: 'PRICE' | 'FEATURE' | 'CATEGORY' | 'PREMIUM',
 ): Promise<ProductContext | null> {
   const current = getProductById(currentProductId);
   if (!current) return null;
 
   let query: string;
   let currentPrice: number | undefined;
+  let direction: 'cheaper' | 'premium' = 'cheaper';
 
   if (reason === 'PRICE') {
     query = `cheaper alternative to ${current.name}`;
     currentPrice = current.price;
+  } else if (reason === 'PREMIUM') {
+    query = `premium alternative similar to ${current.name}, higher-end ${current.tags.slice(0, 3).join(' ')}`;
+    currentPrice = current.price;
+    direction = 'premium';
   } else if (reason === 'FEATURE') {
     query = `${current.name}: ${current.tags.join(' ')}`;
   } else {
@@ -79,6 +84,7 @@ export async function findAlternativeProduct(
     query,
     exclude_id: currentProductId,
     current_price: currentPrice,
+    direction,
     ...(current.category ? { category: current.category } : {}),
   });
 

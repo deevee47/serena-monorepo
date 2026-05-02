@@ -26,19 +26,36 @@ async def find_alternatives(
     query: str,
     exclude_id: str,
     top_k: int = 3,
+    category: str | None = None,
+    min_price: float | None = None,
 ) -> list[ProductContext]:
+    """Generic semantic-similarity search. Optional `category` and
+    `min_price` let callers anchor up (premium alt) or look broadly."""
     log = get_logger()
     vector = await embed_text(query)
+
+    pinecone_filter: dict = {"product_id": {"$ne": exclude_id}}
+    if category:
+        pinecone_filter["category"] = {"$eq": category}
+    if min_price is not None:
+        pinecone_filter["price"] = {"$gt": min_price}
 
     results = _index.query(
         vector=vector,
         top_k=top_k,
-        filter={"product_id": {"$ne": exclude_id}},
+        filter=pinecone_filter,
         include_metadata=True,
     )  # type: ignore[union-attr]
 
     matches = results.get("matches", [])
-    log.debug("pinecone_alternatives", query=query[:80], exclude_id=exclude_id, count=len(matches))
+    log.debug(
+        "pinecone_alternatives",
+        query=query[:80],
+        exclude_id=exclude_id,
+        category=category,
+        min_price=min_price,
+        count=len(matches),
+    )
 
     contexts: list[ProductContext] = []
     for match in matches:
