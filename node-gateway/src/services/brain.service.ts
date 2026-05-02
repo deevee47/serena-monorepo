@@ -81,6 +81,7 @@ export type AlternativesRequest = {
   exclude_id: string;
   current_price?: number;
   top_k?: number;
+  category?: string;
 };
 
 export type AlternativesResponse = {

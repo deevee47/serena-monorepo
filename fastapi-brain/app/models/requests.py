@@ -112,6 +112,10 @@ class AlternativesRequest(BaseModel):
     exclude_id: str
     current_price: float | None = None
     top_k: int = 3
+    # Soft category filter — restricts cheaper-alternative search to the
+    # same product category. Stops $39 hoodies surfacing as alternatives
+    # to $349 office chairs.
+    category: str | None = None
 
 
 class ConverseRequest(BaseModel):
