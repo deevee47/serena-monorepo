@@ -100,3 +100,27 @@ export async function updateCallTurnAnalytics(
     },
   });
 }
+
+/** Bump prior_calls_count for whichever Customer matches this phone, if any.
+ *  Best-effort — anonymous callers / unknown numbers just get skipped. */
+export async function incrementCustomerCallsCount(phoneNumber: string): Promise<void> {
+  if (!phoneNumber || phoneNumber === 'unknown') return;
+  await prisma.customer.updateMany({
+    where: { phone: phoneNumber },
+    data: { priorCallsCount: { increment: 1 } },
+  });
+}
+
+/** Count how many times each side-effect tool fired during the call.
+ *  Returns { send_whatsapp_checkout_link: 1, send_whatsapp_product_info: 0 }-shaped object. */
+export async function getToolDispatchSummary(callId: string): Promise<Record<string, number>> {
+  const rows = await prisma.callTurn.findMany({
+    where: { callId, toolCalled: { not: null } },
+    select: { toolCalled: true },
+  });
+  const counts: Record<string, number> = {};
+  for (const r of rows) {
+    if (r.toolCalled) counts[r.toolCalled] = (counts[r.toolCalled] ?? 0) + 1;
+  }
+  return counts;
+}
