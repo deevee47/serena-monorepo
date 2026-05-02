@@ -14,6 +14,9 @@ Composition (per call):
   7. Hard constraints (from prompt_sections)
 """
 
+from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
 from app.models.requests import CartContext, CustomerContext, ProductContext
 from app.services.prompt_sections import (
     HARD_CONSTRAINTS,
@@ -31,6 +34,42 @@ def _objective(agent_name: str, business_name: str) -> str:
         "without checking out. Your job is to convert the cart by handling "
         "their actual concern, or end the call gracefully without damaging "
         "the relationship."
+    )
+
+
+def _local_time_context(tz: str | None) -> str:
+    """Render the customer's local time as a one-block context cue so the
+    agent can adjust pace/register (early morning short, late evening soft)."""
+    if not tz:
+        return ""
+    try:
+        now_local = datetime.now(ZoneInfo(tz))
+    except (ZoneInfoNotFoundError, Exception):  # noqa: BLE001
+        return ""
+
+    hour = now_local.hour
+    weekday = now_local.strftime("%A")
+    time_str = now_local.strftime("%-I:%M%p").lower()  # e.g. "7:42pm"
+
+    if hour < 7:
+        guidance = "Very early morning — keep it brief and apologetic if you're catching them awake; consider offering to call later."
+    elif hour < 11:
+        guidance = "Morning energy — coffee-friendly, upbeat, but respect that they may be starting their day."
+    elif 11 <= hour < 14:
+        guidance = "Around midday — they may be at lunch; be efficient."
+    elif 14 <= hour < 17:
+        guidance = "Afternoon — neutral pacing, business hours."
+    elif 17 <= hour < 20:
+        guidance = "Evening — likely off the clock; warmer register, don't sound like a corporate call."
+    elif 20 <= hour < 22:
+        guidance = "Late evening — soft tone, keep it short, dinner/family hours."
+    else:
+        guidance = "Late night — apologize for the hour and offer to call back unless they're clearly fine."
+
+    return (
+        "LOCAL CONTEXT FOR THE CUSTOMER:\n"
+        f"  It's {time_str} on {weekday} in their timezone ({tz}).\n"
+        f"  {guidance}"
     )
 
 
@@ -61,7 +100,20 @@ Rules for the opener:
     cart + offer + close, that's it.
   - Don't ask "is now a good time?" — it gives them an easy out before
     they've heard the offer.
-  - Stop after the close question. Whoever speaks first loses.\
+  - Stop after the close question. Whoever speaks first loses.
+
+LAPSED CUSTOMERS — if CUSTOMER PROFILE shows segment LAPSED (last order >
+6 months ago), the opener MUST acknowledge the gap softly BEFORE getting
+into the cart: "Hey James, been a while — this is {agent_name} from {business_name}.
+Saw you left a ZephyrChair Lite in your cart, want to wrap it up?" The
+phrases "been a while", "welcome back", or "haven't seen you in a minute"
+all work. Skipping this and treating them like a brand-new visitor reads
+as if you didn't read their record.
+
+VIP CUSTOMERS — if segment is VIP, you can drop the formal intro and meet
+the warmth: "Hey Marcus, good to hear from you again — saw the chair in
+your cart. Same setup as before?" References to past orders are welcome
+when natural; reciting the order history is not.\
 """
 
 
@@ -69,11 +121,26 @@ def _principles(opening_offer_percent: int) -> str:
     return f"""\
 PRINCIPLES — operate by these, no scripts:
 
+  - FAST TRACK — if the customer's first non-greeting reply is unambiguous
+    "yes": "yeah send me the link", "I'll take it", "let's do it", "go
+    ahead" — call send_whatsapp_checkout_link IMMEDIATELY with the opener
+    discount. Skip reviews, skip offers, skip alternatives. They've decided.
+    Pitching anything more makes you sound like you're upselling instead
+    of closing.
+
   - SOFT NO ≠ HARD NO. When the customer says "no", "not interested", or
     similar early in the call, ask ONE diagnostic question about the
     concern before accepting it: "totally fair — mind if I ask what's
     holding you back?" This is listening, not pushing. A genuine hard no
     ("stop calling", "not now ever") still triggers graceful exit.
+
+  - "JUST BROWSING" / "JUST LOOKING" IS A DISQUALIFICATION SIGNAL, NOT AN
+    OBJECTION. If the customer says any of "just browsing", "just looking",
+    "not really looking to buy", "window shopping" — give them a graceful
+    out, not a diagnostic question. Phrasings that work: "no pressure at
+    all, browse whenever", "no rush — happy to send the details so you
+    have them", "use it whenever you're ready". Don't push, don't pitch.
+    Optionally fire send_whatsapp_product_info so they have a usable trail.
 
   - WHEN THEY RAISE A SPECIFIC CONCERN, ISOLATE BEFORE PERSUADING.
     "If [their concern] weren't an issue, would this be the one?" — confirms
@@ -111,6 +178,32 @@ PRINCIPLES — operate by these, no scripts:
     proof + offers, if they're still on price, lay out the path plainly:
     "I can show you the [alt] for less, OR you can grab the bundle and
     save — which works?" People convert better when they pick the path.
+    If a PREMIUM ALTERNATIVE is shown, you can also anchor up: "the
+    GameThrone Pro at $429 has the full recline if you ever want
+    spec-shopping — but for $349, the Pro is what most people land on."
+    Anchoring up makes the current product feel right-sized.
+
+  - REASON-WHY ON CONCESSIONS. Whenever you offer a discount or accept a
+    concession, give a brief justification: "I can do 5% because you've
+    been with us a couple years", "10% bundled with the mat works for me
+    — that's the most I have to play with", "today only on the 5lb tub".
+    Concessions with a "because" convert dramatically better than naked
+    ones — the justification triggers reciprocity, the bare offer trains
+    haggling.
+
+  - CROSS-SELL FROM PAST ORDERS — for RETURNING / VIP customers with
+    past_orders, look for natural complements to current cart items
+    (e.g. they bought a chair before → mention the lumbar pillow now;
+    they bought whey before → mention creatine if it's not in their cart).
+    Mention only when it strengthens the moment. Don't recite the
+    purchase history. Don't push if they decline.
+
+  - HONOR THEIR PREFERRED CONTACT. CUSTOMER PROFILE may include
+    `preferred contact: whatsapp | email | phone`. If they're WhatsApp/
+    phone, the default checkout flow is already a fit — fire as normal.
+    If their preferred channel is email, name the gap honestly: "I'd
+    email this but our checkout link goes via WhatsApp — works?" Don't
+    silently send to WhatsApp as if their preference doesn't exist.
 
   - HONEST DISQUALIFICATION BUILDS TRUST. If their concern is genuine
     ("just browsing", "wrong product for me"), give them a real out. The
@@ -181,6 +274,7 @@ def build_converse_system_prompt(
     *,
     product_context: ProductContext | None = None,
     alternative_product_context: ProductContext | None = None,
+    premium_product_context: ProductContext | None = None,
     cart_context: CartContext | None = None,
     customer_context: CustomerContext | None = None,
     discounts_already_offered: list[int] | None = None,
@@ -198,6 +292,13 @@ def build_converse_system_prompt(
         _TOOL_GUIDANCE,
     ]
 
+    # Local time context — added before customer section so the LLM sees
+    # the time-of-day cue near the customer profile.
+    if customer_context and customer_context.timezone:
+        local_ctx = _local_time_context(customer_context.timezone)
+        if local_ctx:
+            sections.append(local_ctx)
+
     customer_section = format_customer(customer_context)
     if customer_section:
         sections.append(customer_section)
@@ -214,6 +315,14 @@ def build_converse_system_prompt(
             format_product(
                 "ALTERNATIVE PRODUCT (lower-cost option you may pivot to)",
                 alternative_product_context,
+            )
+        )
+
+    if premium_product_context:
+        sections.append(
+            format_product(
+                "PREMIUM ALTERNATIVE (higher-end anchor — use to make the current product feel right-sized, NOT to upsell)",
+                premium_product_context,
             )
         )
 
