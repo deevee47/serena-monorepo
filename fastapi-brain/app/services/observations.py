@@ -111,6 +111,55 @@ _ZIP_PREFIX_DAYS: list[tuple[str, int, int]] = [
 ]
 
 
+# ─── get_available_offers ──────────────────────────────────────────────────
+
+
+async def get_available_offers(db: Prisma, product_id: str) -> dict[str, Any]:
+    """Return active promotional offers for a product.
+
+    BUNDLE: customer must add `bundle_product` to qualify.
+    QUANTITY: customer must order at least `min_quantity` of this product.
+
+    The agent uses these to make value-add offers (cross-sell, upsell)
+    instead of jumping straight to a flat negotiation discount."""
+    product = await db.product.find_unique(where={"id": product_id})
+    if product is None:
+        return {"error": "product_not_found", "product_id": product_id}
+
+    offers = await db.offer.find_many(
+        where={"productId": product_id, "isActive": True},
+        order={"discountPercent": "desc"},
+    )
+    if not offers:
+        return {"product_id": product_id, "offers": []}
+
+    rendered: list[dict[str, Any]] = []
+    for o in offers:
+        item: dict[str, Any] = {
+            "id": o.id,
+            "type": o.type,  # 'BUNDLE' | 'QUANTITY'
+            "discount_percent": o.discountPercent,
+            "short_pitch": o.shortPitch,
+            "description": o.description,
+        }
+        if o.type == "BUNDLE" and o.bundleProductId:
+            bundle = await db.product.find_unique(where={"id": o.bundleProductId})
+            if bundle:
+                item["bundle_product"] = {
+                    "product_id": bundle.id,
+                    "name": bundle.name,
+                    "price": float(bundle.price),
+                }
+        elif o.type == "QUANTITY" and o.minQuantity is not None:
+            item["min_quantity"] = o.minQuantity
+        rendered.append(item)
+
+    return {"product_id": product_id, "offers": rendered}
+
+
+# ─── get_delivery_eta ───────────────────────────────────────────────────────
+
+
 async def get_delivery_eta(db: Prisma, zip_code: str, product_id: str) -> dict[str, Any]:
     # Verify product exists; if not, return defaults but flag.
     product = await db.product.find_unique(where={"id": product_id})
@@ -154,4 +203,6 @@ async def execute_observation_tool(
         return await get_review_summary(db, args["product_id"])
     if name == "get_delivery_eta":
         return await get_delivery_eta(db, args["zip_code"], args["product_id"])
+    if name == "get_available_offers":
+        return await get_available_offers(db, args["product_id"])
     return {"error": f"unknown_observation_tool: {name}"}

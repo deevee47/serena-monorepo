@@ -18,6 +18,7 @@ async def alternatives(req: AlternativesRequest) -> AlternativesResponse:
             current_price=req.current_price,
             query=req.query,
             exclude_id=req.exclude_id,
+            category=req.category,
         )
         alternatives_list = [result] if result else []
     else:

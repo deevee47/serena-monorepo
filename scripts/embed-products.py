@@ -52,6 +52,18 @@ async def main() -> None:
 
     index = pc.Index(pinecone_index_name)
 
+    # Wipe stale vectors before re-upserting. Without this, products
+    # deleted/deactivated in the DB stay searchable in Pinecone forever.
+    try:
+        index.delete(delete_all=True)
+        print("Wiped existing vectors from Pinecone index (clean slate).")
+    except Exception as exc:  # noqa: BLE001
+        # Empty namespace raises; that's fine.
+        if "not found" in str(exc).lower() or "404" in str(exc):
+            print("Pinecone index was already empty.")
+        else:
+            print(f"Pinecone delete_all warning (continuing anyway): {exc}")
+
     db = Prisma(datasource={"url": database_url})
     await db.connect()
 
@@ -87,13 +99,20 @@ async def main() -> None:
         index.upsert(vectors=vectors)
         print(f"\nUpserted {len(vectors)} vectors to Pinecone index '{pinecone_index_name}'.")
 
+    # Cosmetic post-flag — not used in any search path. Wrap so a stale
+    # Prisma client or a quirky response doesn't fail the script after
+    # Pinecone is already up to date.
+    marked = 0
     for v in vectors:
-        await db.product.update(
-            where={"id": v["id"]},
-            data={"embeddingSynced": True},
-        )
-
-    print(f"Marked {len(vectors)} products as embedding_synced=True in Postgres.")
+        try:
+            await db.product.update(
+                where={"id": v["id"]},
+                data={"embeddingSynced": True},
+            )
+            marked += 1
+        except Exception as exc:  # noqa: BLE001
+            print(f"  Warning: could not flag {v['id']} as synced: {type(exc).__name__}")
+    print(f"Marked {marked}/{len(vectors)} products as embedding_synced=True in Postgres.")
     await db.disconnect()
     print("Done.")
 

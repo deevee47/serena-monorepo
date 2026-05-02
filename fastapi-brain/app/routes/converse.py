@@ -38,6 +38,9 @@ def _build_inputs(body: ConverseRequest) -> tuple[str, list[dict]]:
         cart_context=body.cart_context,
         customer_context=body.customer_context,
         discounts_already_offered=body.discounts_already_offered,
+        agent_name=body.agent_name,
+        business_name=body.business_name,
+        opening_offer_percent=body.opening_offer_percent,
     )
     messages = build_chat_messages(
         utterance=body.utterance,

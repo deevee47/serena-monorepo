@@ -4,7 +4,7 @@ import { z } from 'zod';
 
 // Load a service-local .env first, then fall back to the repo root .env for monorepo dev.
 loadEnv();
-loadEnv({ path: fileURLToPath(new URL('../../.env', import.meta.url)) });
+loadEnv({ path: fileURLToPath(new URL('../../../.env', import.meta.url)) });
 
 const envSchema = z.object({
   PORT: z.coerce.number().default(3000),
@@ -12,6 +12,7 @@ const envSchema = z.object({
   VAPI_WEBHOOK_SECRET: z.string().min(1),
   VAPI_API_KEY: z.string().min(1),
   VAPI_ASSISTANT_ID: z.string().min(1),
+  VAPI_PHONE_NUMBER_ID: z.string().min(1).optional(),
   FASTAPI_BRAIN_URL: z.string().url(),
   INTERNAL_SERVICE_SECRET: z.string().min(1),
   ADMIN_SECRET: z.string().min(1),

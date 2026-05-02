@@ -51,17 +51,28 @@ async def find_cheaper_alternative(
     current_price: float,
     query: str,
     exclude_id: str,
+    category: str | None = None,
 ) -> ProductContext | None:
+    """Find a cheaper product to pivot to.
+
+    `category` is a soft constraint: when provided, we filter Pinecone to
+    matching-category products. This stops the agent from suggesting a $39
+    hoodie as a 'cheaper alternative' to a $349 ergonomic chair.
+    """
     log = get_logger()
     vector = await embed_text(query)
+
+    pinecone_filter: dict = {
+        "price": {"$lt": current_price},
+        "product_id": {"$ne": exclude_id},
+    }
+    if category:
+        pinecone_filter["category"] = {"$eq": category}
 
     results = _index.query(
         vector=vector,
         top_k=3,
-        filter={
-            "price": {"$lt": current_price},
-            "product_id": {"$ne": exclude_id},
-        },
+        filter=pinecone_filter,
         include_metadata=True,
     )
 
@@ -71,6 +82,7 @@ async def find_cheaper_alternative(
         query=query[:80],
         exclude_id=exclude_id,
         current_price=current_price,
+        category=category,
         count=len(matches),
     )
 
