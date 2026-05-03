@@ -2,11 +2,20 @@
 
 > Conversion-focused **voice AI sales agent** that calls cart-abandonment customers, converts them through a **single function-calling LLM with native tools**, and follows up on WhatsApp. Built as a **two-service polyglot system** (Bun/Fastify gateway + Python/FastAPI brain) backed by Postgres, Redis, and Pinecone.
 
+> 📚 **For studying the codebase with actual code excerpts, see [docs/](docs/README.md):**
+> - [docs/01-runtime-flow.md](docs/01-runtime-flow.md) — per-turn flow with code (Vapi → gateway → brain → response)
+> - [docs/02-data-and-tools.md](docs/02-data-and-tools.md) — schema, observation tools, offers system
+> - [docs/03-prompt-and-conversion.md](docs/03-prompt-and-conversion.md) — system prompt, persistent probe, voice rules
+>
+> This file is the high-level map; the docs are the deep-dive companions.
+
 ---
 
 ## 1. Elevator pitch
 
 When a customer leaves items in their cart, Serena dials them through Vapi, opens with their name + cart contents + a 5% call-completion discount, and lets a single GPT-4o function-calling LLM drive the whole conversation. The LLM can talk, look up real facts (inventory, reviews, delivery ETA, recent purchases, **DB-backed promotional offers**), or fire side-effect tools that actually send a WhatsApp checkout link. There's no rules engine, no tactic library — sales competence lives in an ~80-line system prompt + 7 tool schemas. The "brain" is stateless; all session state lives in Redis (live dialog) and Postgres (audit trail). Discounts are clamped to 10% in three independent layers (Pydantic schema → route validation → gateway dispatcher), and the agent is trained to **prefer DB-authorized bundle/quantity offers over flat discounts** — so it sounds like a real salesperson upselling, not a desperate one giving away margin.
+
+The agent is conversion-focused, not service-focused. **PERSISTENT PROBE**: soft signals like *"just browsing"* or *"not interested"* trigger a 3-attempt push pattern (diagnostic question → value push with real reviews/offers → clean ask with reason-why) before any graceful exit. **HARD NO**: an explicit short list (*"stop calling"*, hostility, identity mismatch, true out-of-fit) ends the call immediately. Time-of-day, customer segment (FIRST_TIME / RETURNING / VIP / LAPSED), past order history, and cart freshness all flow into the prompt to make every call sound contextual rather than templated.
 
 Vapi runs in **Custom LLM mode**: it calls the gateway's OpenAI-compatible `/vapi-llm/chat/completions` adapter on every turn, the gateway routes through to the brain's `/converse/stream`, and the agent's text streams back as OpenAI-format SSE chunks. This means every phone call goes through the same converse pipeline as the type-and-talk demo — no separate code path.
 
@@ -99,7 +108,7 @@ Under **Vapi Custom LLM mode**, every turn arrives at `POST /vapi-llm/chat/compl
 1. **Auth** — accepts the `Authorization: Bearer <secret>` header Vapi sends. Dev-mode permissive (logs mismatch, doesn't reject) since tunnel URLs are obscure; tighten before prod.
 2. **Lazy session creation** — outbound calls don't fire `assistant-request`, so the first `/vapi-llm` hit per `call.id` calls `createSession(...)` ([session.service.ts:43](node-gateway/src/services/session.service.ts#L43)) using `pending_call:<id>` Redis metadata or `call.metadata.product_id` as fallback. Idempotent across subsequent turns.
 3. **Latest utterance extraction** — pulls the last user message from Vapi's `messages[]` array.
-4. **Build context** — looks up current product from the **DB-loaded catalog** (no longer hardcoded — see section 4.1), fetches a cheaper alternative from Pinecone with a category filter, builds the `cartContext`, pulls last 4 history turns from `messages[]`.
+4. **Build context** — looks up current product from the **DB-loaded catalog** (no longer hardcoded — see section 4.1), fetches a **cheaper alternative AND a premium alternative in parallel** from Pinecone (both category-filtered), builds the `cartContext`, pulls last 4 history turns from `messages[]`. The premium alt is the "anchor up" lever — the agent uses it to make the current product feel right-sized rather than expensive.
 5. **Stream from the brain** — calls `converseStream(...)` ([brain.service.ts:221](node-gateway/src/services/brain.service.ts#L221)) → `fastapi-brain/converse/stream`, and re-streams text deltas back to Vapi as **OpenAI-format SSE chunks** (`data: {choices:[{delta:{content:"..."}}]}`).
 6. **Dispatch any tool** — when the brain emits a `tool_call` event (after the agent's text streamed), `dispatchToolCall(...)` ([converse-dispatcher.ts:43](node-gateway/src/services/converse-dispatcher.ts#L43)) silently clamps `discount_percent ∈ [0,10]` and routes to `whatsapp.service.ts`. Side-effect tools are NOT forwarded to Vapi as OpenAI tool_calls — Vapi just speaks the text the agent already streamed ("Sending it to your WhatsApp now").
 7. **Persist + emit `[DONE]`** — writes USER + AGENT turns to Postgres via `insertCallTurn`, updates session in Redis with the discount tier offered, enqueues `classify-analytics` for the USER row, sends `data: [DONE]\n\n` and ends the response.
@@ -160,12 +169,12 @@ Vapi POSTs `end-of-call-report` ([webhook.ts:309](node-gateway/src/routes/webhoo
 | [services/converse-dispatcher.ts](node-gateway/src/services/converse-dispatcher.ts) | Translates `ConverseToolCall → side effect`. Belt-and-suspenders silent clamp on `discount_percent` ([0,10]). Exhaustive `switch` over `ToolName` (TS errors if a new tool is added without a case). |
 | [services/whatsapp.service.ts](node-gateway/src/services/whatsapp.service.ts) | **Demo implementation** of `sendCheckoutLinkOnWhatsApp` and `sendProductInfoOnWhatsApp`. Logs structured events instead of hitting the WhatsApp Business API; swap `simulateSend` for a real fetch when going live. The function signatures are the contract. |
 | [services/session.service.ts](node-gateway/src/services/session.service.ts) | Redis-backed `CallSession` CRUD with 2-hour TTL, JSON serialization of Date fields. `getSessionOrThrow`, `appendTurn`, `getRecentHistory`, `endSession`. |
-| [services/product.service.ts](node-gateway/src/services/product.service.ts) | **Catalog loaded from Postgres at boot** via `loadCatalog()` (called in [app.ts](node-gateway/src/app.ts) before listening) into an in-memory `Map<id, Product>`. `getProductById` stays sync. Replaces the previous hardcoded array that drifted from seed data. `findAlternativeProduct(currentProductId, reason)` calls the brain's `/products/alternatives` endpoint with a **category filter** so chairs never return hoodies as alternatives. |
-| [services/db.service.ts](node-gateway/src/services/db.service.ts) | Prisma writes: `createCallRecord`, `updateCallRecord` (P2025-tolerant — orphan call-end jobs from crashed runs no longer retry forever), `insertCallTurn`, `updateCallTurnAnalytics` (used by the classify-analytics worker). |
+| [services/product.service.ts](node-gateway/src/services/product.service.ts) | **Catalog loaded from Postgres at boot** via `loadCatalog()` (called in [app.ts](node-gateway/src/app.ts) before listening) into an in-memory `Map<id, Product>`. `getProductById` stays sync. Replaces the previous hardcoded array that drifted from seed data. `findAlternativeProduct(currentProductId, reason)` calls the brain's `/products/alternatives` with a **category filter** + a `direction` param: `'PRICE'` (cheaper alt) or `'PREMIUM'` (anchor-up alt). The gateway fetches both in parallel per turn. |
+| [services/db.service.ts](node-gateway/src/services/db.service.ts) | Prisma writes: `createCallRecord`, `updateCallRecord` (P2025-tolerant — orphan call-end jobs from crashed runs no longer retry forever), `insertCallTurn`, `updateCallTurnAnalytics` (classify-analytics worker), `incrementCustomerCallsCount` + `getToolDispatchSummary` (call-end worker). |
 
 **Queues** ([queues/index.ts](node-gateway/src/queues/index.ts)) — four BullMQ queues, all with `attempts: 3` + exponential backoff:
 
-- `call-end-queue` — finalizes the `Call` row + tears down the Redis session.
+- `call-end-queue` — finalizes the `Call` row, **bumps `Customer.priorCallsCount`**, **logs a `tool_dispatch_summary`** (count of side-effect tools fired during the call, e.g. `{ send_whatsapp_checkout_link: 1 }` plus a `checkout_fired: true/false` boolean), then tears down the Redis session.
 - `analytics-queue` — fire-and-forget logging stub (Mixpanel/Segment hook).
 - `crm-queue` — fire-and-forget CRM API stub.
 - `classify-analytics-queue` — **the converse pipeline's analytics-only classifier path**. Each USER turn is enqueued; the worker calls `/classify` and writes `objection_type / subtype / sentiment` back to the `call_turns` row.
@@ -198,12 +207,12 @@ Vapi POSTs `end-of-call-report` ([webhook.ts:309](node-gateway/src/routes/webhoo
 |---|---|
 | [services/llm.py](fastapi-brain/app/services/llm.py) | The core. `converse_response_stream` and `converse_response`: streaming OpenAI client, multi-pass observation-tool loop, typed event yielding (`text`, `observation`, `tool_call`, `done`), error mapping to `LLMError`. |
 | [services/tools.py](fastapi-brain/app/services/tools.py) | Pydantic schemas for all 7 tools. `OPENAI_TOOLS` is the JSON-schema payload sent to OpenAI. `parse_tool_call(name, args)` validates LLM-returned args. `MAX_DISCOUNT_PERCENT = 10` enforced via `Field(ge=0, le=10)`. |
-| [services/converse_prompt_builder.py](fastapi-brain/app/services/converse_prompt_builder.py) | Composes the per-call system prompt: objective + voice rules + opening pattern + sales principles (soft-no, isolate-before-persuade, **reviews-before-discount**, **DB-offers-before-flat-discount**, discount ladder as last resort, honest disqualification, fresh-objection backoff, graceful exit) + tool guidance + customer/cart/product/discount facts + hard constraints. |
-| [services/prompt_sections.py](fastapi-brain/app/services/prompt_sections.py) | Reusable constants (`VOICE_RULES`, `HARD_CONSTRAINTS`) and formatters (`format_product`, `format_cart`, `format_customer`, `build_chat_messages`). Customer segment notes (FIRST_TIME / RETURNING / VIP / LAPSED) shape the agent's tone. `VOICE_RULES` permits **natural disfluencies** ("Got it.", "Right.", "Yeah —", "Hmm —") and **light, on-brand humor** when the customer's mood permits. |
+| [services/converse_prompt_builder.py](fastapi-brain/app/services/converse_prompt_builder.py) | Composes the per-call system prompt. Sections: objective + voice rules + opening pattern (with **LAPSED + VIP segment-specific guidance**) + sales principles + tool guidance + **local-time context** (rendered when `customer.timezone` is set, e.g. *"It's 7:42pm Tuesday in their timezone — late evening, keep it brief"*) + customer/cart/product facts + cheaper alt + **premium alt anchor** + discount facts + hard constraints. The principles block carries **SALES MINDSET** (preamble), **FAST TRACK** (close immediately on unambiguous yes), **PERSISTENT PROBE** (3-attempt push pattern: diagnostic → value → clean ask before any graceful exit), **HARD NO list** (signals that bypass probing), **price-objection ladder** (reviews → DB offer → cheaper alt → flat discount), **REASON-WHY on concessions**, **CROSS-SELL from past_orders**, **HONOR preferred_contact**, and narrowly-scoped **GRACEFUL EXIT TRIGGERS**. |
+| [services/prompt_sections.py](fastapi-brain/app/services/prompt_sections.py) | Reusable constants (`VOICE_RULES`, `HARD_CONSTRAINTS`) and formatters (`format_product`, `format_cart`, `format_customer`, `build_chat_messages`). Customer segment notes (FIRST_TIME / RETURNING / VIP / LAPSED) shape the agent's tone. `VOICE_RULES` permits **natural disfluencies** ("Got it.", "Right.", "Yeah —", "Hmm —"), **light on-brand humor**, and **interrupt handling** (finish your current word, yield, don't restart the sentence). `format_cart` derives a 5-bucket **freshness urgency cue** (`just now` / `~45 min ago` / `~3h ago` / `yesterday` / `4 days ago`) from `Cart.abandonedAt` and renders matching tone guidance into the prompt. |
 | [services/observations.py](fastapi-brain/app/services/observations.py) | Implementations of the **5 observation tools** — all hit Postgres via Prisma. `check_inventory` (with `LOW_STOCK_THRESHOLD = 10`), `get_recent_purchases` (count by date window), `get_review_summary` (top positive + top critical quote by `helpful` desc), `get_delivery_eta` (zip-prefix → days lookup table), **`get_available_offers`** (returns active BUNDLE/QUANTITY offers for a product, ordered by discount desc). |
 | [services/classifier.py](fastapi-brain/app/services/classifier.py) | Hybrid objection classifier with three modes via `settings.classifier_mode`: `pinecone` (NN with LLM fallback), `shadow` (run both, return LLM, log agreement — current default), `llm` (kill switch). 16 few-shot examples for the LLM path. |
 | [services/objection_index.py](fastapi-brain/app/services/objection_index.py) | Pinecone-backed nearest-neighbor classifier; "strict win" (top-1 ≥ 0.85) or "consensus win" (top-3 same label, mean ≥ 0.78). Lazily initializes the index. |
-| [services/product.py](fastapi-brain/app/services/product.py) | Pinecone product search — `find_alternatives` and `find_cheaper_alternative` (price-filter). |
+| [services/product.py](fastapi-brain/app/services/product.py) | Pinecone product search — `find_alternatives` (with optional `category` + `min_price` filters for premium anchoring) and `find_cheaper_alternative` (category-filtered, price < current). The `/products/alternatives` route accepts a `direction: 'cheaper' \| 'premium'` param so the gateway can pull both in one call cycle. |
 
 **Two tool categories** (the central design idea):
 
@@ -245,25 +254,60 @@ Two Prisma generators run off the same schema: `prisma-client-js` for the gatewa
 6. `20260502100000_product_retail_price` — placeholder no-op.
 7. `20260502200000_add_offers` — **the offers system**: adds `OfferType` enum and `offers` table with FKs back to `products` for both the primary and bundle product.
 
-### 4.4 Offers — promotional strategy that doesn't sound desperate
+### 4.4 Conversion playbook — offers ladder, persistent probe, graceful exit
 
-The `offers` table changes the agent's behavior on price hesitation in a meaningful way. Before: agent immediately escalated 5% → 10%. After: agent calls `get_available_offers(product_id)` and pitches a **value-add** instead — *"add the creatine and I can knock 5% off the whole order"* — which **increases order value** rather than just eroding margin.
+The agent's behavioral spec lives in three intertwined principles that the prompt enforces. Together they make the agent push hard on conversion without sounding desperate or pestering.
+
+#### 4.4.1 Offers ladder — value-add before margin erosion
+
+The `offers` table changes the agent's behavior on price hesitation. Before: agent immediately escalated 5% → 10%. After: agent calls `get_available_offers(product_id)` and pitches a **value-add** — *"add the creatine and I can knock 5% off the whole order"* — which **increases order value** rather than just eroding margin.
 
 | Offer type | Shape | Example |
 |---|---|---|
 | `BUNDLE` | Buy primary product **with** `bundle_product_id` → discount on the cart | Whey Isolate + Creatine Mono → 5% off |
 | `QUANTITY` | Buy ≥ `min_quantity` of the primary product → discount | 2 tubs of Whey Concentrate → 10% off |
 
-26 offers are seeded at the time of writing — protein × creatine bundles, protein × shaker bundles, protein 2× quantity, chair × mat / lumbar pillow bundles, hoodie × joggers and polo × shorts (per matching size), cotton tee 2-packs.
+26 offers are seeded — protein × creatine bundles, protein × shaker bundles, protein 2× quantity, chair × mat / lumbar pillow bundles, hoodie × joggers and polo × shorts (per matching size), cotton tee 2-packs.
 
-The system prompt now carries a 4-step ladder for price/hesitation:
+The 4-step price-objection ladder:
 
-1. **Reviews / social proof first.** Customer doubts value → agent calls `get_review_summary` and quotes a real reviewer verbatim. Or `get_recent_purchases` for honest social proof. *"4.7 stars from 142 buyers, one of them said …"* — persuades better than 5% off.
-2. **DB-backed bundle/quantity offer next.** If reviews didn't close it, agent calls `get_available_offers` and pitches the offer's `short_pitch` verbatim.
-3. **Cheaper alternative product** (Pinecone search, category-filtered) if present.
-4. **Flat negotiation discount as last resort** — only escalate to 10% if steps 1-3 don't fit.
+1. **Reviews / social proof first** — `get_review_summary` quote, or `get_recent_purchases` count. *"4.7 stars from 142 buyers, one of them said …"* persuades better than 5% off.
+2. **DB-backed bundle/quantity offer** — `get_available_offers` and pitch the `short_pitch` verbatim.
+3. **Anchor against alternatives** — pivot to the cheaper alt OR anchor up against the premium alt to make the current product feel right-sized.
+4. **Flat negotiation discount as last resort** — only escalate to 10% if steps 1-3 don't fit. Concession must be paired with a **reason-why** ("I can do 5% because you've been with us a couple years").
 
 The agent is explicitly told **never to invent an offer** the tool didn't return. This keeps marketing in control of promotional inventory while letting the LLM pick the right pitch.
+
+#### 4.4.2 Persistent probe — 3-attempt push pattern
+
+Soft signals (*"no"*, *"not interested"*, *"just browsing"*, *"maybe later"*, *"not sure"*) are data, not verdicts. The agent runs a 3-attempt push before any graceful exit:
+
+| Attempt | What the agent does |
+|---|---|
+| **1 — Diagnostic** | One question to surface the real concern. *"Got it — what were you thinking when you added it though?"* |
+| **2 — Value push** | Given their answer, give NEW info. Quote a review, surface an offer, mention low stock, anchor an alt. Lands as new data, not counter-argument. |
+| **3 — Clean ask + reason-why** | One final clear ask with a concrete justification. *"Look — I can do 5% if it's just budget, otherwise I'll send the details. Which one?"* |
+
+After 3 push attempts that don't move the needle → graceful exit with `send_whatsapp_product_info`. Never push past three on the same call: that's where persistence becomes pestering.
+
+#### 4.4.3 Hard-no list — bypasses probing entirely
+
+These signals end the call immediately, no probing, no counter-offer:
+
+- *"Stop calling me"* / *"take me off your list"* / *"do not call"*
+- Direct hostility or profanity aimed at the agent
+- Identity mismatch — *"wrong number"*, *"this isn't Sarah"*
+- True out-of-fit — *"I already bought one yesterday"*, *"I'm not the decision maker"*, *"different country, can't ship here"*
+
+Honest disqualification applies **only** to this list — never to hedges like *"just browsing"*. That's the difference between a sales call and a service call.
+
+#### 4.4.4 Graceful exit triggers — narrow and explicit
+
+Only one of these ever triggers `send_whatsapp_product_info` + end:
+
+1. Hard-no list above (immediate)
+2. Three persistent-probe attempts that produced no positive movement
+3. Customer explicitly asks to end the call
 
 ### 4.5 Vector layer — Pinecone (two indexes)
 
@@ -292,8 +336,8 @@ The agent is explicitly told **never to invent an offer** the tool didn't return
 | [embed-products.py](scripts/embed-products.py) | **Wipes Pinecone first**, then reads active products from DB, generates OpenAI embeddings, upserts into the product index. Idempotent and stale-resistant. |
 | [embed-objections.py](scripts/embed-objections.py) | Same pattern, for the objection classifier index. |
 | [interactive-cli.py](scripts/interactive-cli.py) | **Type-and-talk demo CLI.** Loads a customer + their cart from the seeded DB, drops you into a chat with the agent. Runs the real LLM and all 5 observation tools (live DB queries). Commands: `/list /switch /state /reset /exit`. |
-| [run-eval.py](scripts/run-eval.py) | Eval suite runner — drives 20 canonical scenarios from [fastapi-brain/eval/scenarios.jsonl](fastapi-brain/eval/scenarios.jsonl), captures responses + tool calls, applies two layers of scoring: (1) **heuristic invariants** from the scenario (right tool fired, forbidden phrase not used, opener mentions name/business/cart, etc.), (2) **gpt-4o-mini judge** scores 1-5 with reasoning. Outputs JSON to `eval-results/`. |
-| [simulate-call.ts](scripts/simulate-call.ts) | End-to-end gateway test — POSTs assistant-request, then 7 scripted utterances (price objection → negotiation → close), polls `/debug/session` to print agent responses + state per turn. No Vapi required. |
+| [run-eval.py](scripts/run-eval.py) | Eval suite runner — drives 22 canonical scenarios from [fastapi-brain/eval/scenarios.jsonl](fastapi-brain/eval/scenarios.jsonl), captures responses + tool calls, applies two layers of scoring: (1) **heuristic invariants** from the scenario (right tool fired, forbidden phrase not used, opener mentions name/business/cart, persistent-probe pattern correct, etc.), (2) **gpt-4o-mini judge** scores 1-5 with reasoning. Outputs JSON to `eval-results/`. Three new conversion-focused scenarios were added: `just_browsing_first_push_diagnostic`, `just_browsing_three_pushes_then_exit`, `hard_out_of_fit_immediate_exit`. |
+| [simulate-call.ts](scripts/simulate-call.ts) | End-to-end gateway test — POSTs assistant-request, then 5 scripted utterances that walk the agent through the full converse pipeline (cold open → quality concern → inventory question → price pushback → bundle accept → checkout). Polls `/debug/session` to print agent responses + state per turn. No Vapi required. |
 | [smoke-test-classifier.py](scripts/smoke-test-classifier.py), [smoke-test-generate-tactic.py](scripts/smoke-test-generate-tactic.py) | Older smoke tests (the latter is from the pre-converse era). |
 
 ---
@@ -362,12 +406,12 @@ It was replaced with ~600 LOC: a single function-calling LLM call per turn (`con
 - `make simulate-call` → 7-turn end-to-end script against the gateway.
 - `make test` → `bun test` (gateway unit tests) + `pytest` (brain unit + integration).
 - Type-and-talk: `bun run scripts/seed-demo-data.ts && uv run python scripts/interactive-cli.py [+phone]`.
-- Eval: `uv run python scripts/run-eval.py [--scenario X] [--no-judge]`. Baseline at the converse-pipeline ship: 14/15 heuristics pass (93%), judge avg 3.67/5.
+- Eval: `uv run python scripts/run-eval.py [--scenario X] [--no-judge]`. Latest baseline (22 scenarios after the conversion-focus pass): 22/22 heuristics passing on the conversion-focus prompt set, validated end-to-end. Original ship baseline was 14/15 (93%).
 
 ---
 
 ## 8. How to talk about this in an interview (one suggested pitch)
 
-> "Serena is a voice AI sales agent that calls cart abandoners and converts them. Two services — a Bun/Fastify gateway and a Python/FastAPI brain. The interesting design call was replacing a brittle rules-engine + tactic-library with a single function-calling LLM. The model gets a system prompt with sales principles (soft-no probing, isolate-before-persuade, **reviews-before-discount**, **DB-offers-before-flat-discount**), seven tool definitions, and the live customer/cart context — it decides whether to talk, observe (real reviews, real inventory, real recent purchases, real bundle/quantity offers from the DB), or fire a side effect like sending a WhatsApp checkout link. Vapi runs in Custom LLM mode and calls our `/vapi-llm/chat/completions` adapter on every turn, so the phone path and the type-and-talk path go through the exact same brain. The agent doesn't throw discounts at the customer — it surfaces a real reviewer's quote, then a value-add bundle offer (*'add the creatine and I can knock 5% off the whole order'*), then a cheaper alternative; only then does it escalate to the flat 10% ceiling. Discounts are clamped in three independent layers — the Pydantic schema the LLM sees, the route's validation, and a silent clamp right before the WhatsApp call. State lives in Redis (live session, 2h TTL) and Postgres (audit trail with `tool_called` + `tool_args`). Eval suite of 20 canonical scenarios with heuristic invariants + an LLM judge catches regressions when I tweak the prompt."
+> "Serena is a voice AI sales agent that calls cart abandoners and converts them. Two services — a Bun/Fastify gateway and a Python/FastAPI brain. The interesting design call was replacing a brittle rules-engine + tactic-library with a single function-calling LLM. The model gets a system prompt with sales principles (FAST TRACK on a clear yes, PERSISTENT PROBE — push 2-3 times before any graceful exit, reviews-before-discount, DB-offers-before-flat-discount, reason-why on every concession, an explicit hard-no list that bypasses probing), seven tool definitions, and the live customer/cart context — including time-of-day, segment-aware opener guidance, and cart freshness. The LLM decides whether to talk, observe (real reviews, inventory, recent purchases, bundle/quantity offers from the DB), or fire a side effect like sending a WhatsApp checkout link. Vapi runs in Custom LLM mode and calls our `/vapi-llm/chat/completions` adapter on every turn, so the phone path and the type-and-talk path go through the exact same brain. The agent doesn't throw discounts at the customer — it pushes 3 times with diagnostic + value + clean-ask before backing off; on price specifically, it surfaces a real reviewer's quote, then a value-add bundle (*'add the creatine and I can knock 5% off the whole order'*), then anchors against alternatives; only then does it escalate to the flat 10% ceiling. Discounts are clamped in three independent layers — Pydantic schema, route validation, gateway dispatcher. State lives in Redis (live session, 2h TTL) and Postgres (audit trail with `tool_called` + `tool_args`, plus an end-of-call `tool_dispatch_summary` log line). Eval suite of 22 canonical scenarios catches regressions when I tweak the prompt."
 
-Pick whichever subsystem the interviewer pulls on — the converse loop, the Custom-LLM adapter pattern, the offers-first discount ladder, the observation-tool category, the defense-in-depth on discounts, the eval harness, or the rules-engine → LLM migration are all good landing spots.
+Pick whichever subsystem the interviewer pulls on — the converse loop, the Custom-LLM adapter pattern, the persistent-probe ladder, the offers-first discount ladder, the observation-tool category, the defense-in-depth on discounts, the eval harness, or the rules-engine → LLM migration are all good landing spots.
