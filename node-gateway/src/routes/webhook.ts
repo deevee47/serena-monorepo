@@ -22,7 +22,12 @@ import {
 } from '../services/brain.service.js';
 import { dispatchToolCall } from '../services/converse-dispatcher.js';
 import { findAlternativeProduct, getProductById, toProductContext } from '../services/product.service.js';
-import { createCallRecord, insertCallTurn } from '../services/db.service.js';
+import {
+  createCallRecord,
+  getRecentTurnSignals,
+  insertCallTurn,
+  loadCallContext,
+} from '../services/db.service.js';
 import {
   callEndQueue,
   analyticsQueue,
@@ -64,17 +69,44 @@ async function processTranscript(callId: string, utterance: string): Promise<voi
     }
   }
 
-  // Demo cart: under the converse pipeline the agent should reference what's
-  // in the cart, not just the current product. Real integrations source this
-  // from the storefront cart service. For now the cart contains the current
-  // product as a single line item.
-  const cartContext: CartContextPayload | null = product
-    ? {
-        items: [{ product_id: product.id, name: product.name, price: product.price, quantity: 1 }],
-        total: product.price,
-        abandoned_minutes_ago: null,
-      }
-    : null;
+  // Live customer + cart context cached on Redis so we hit Postgres once per
+  // call, not once per turn. Same hydration as the vapi-llm path.
+  const ctxKey = `call_ctx:${callId}`;
+  let loaded;
+  const cached = await redis.get(ctxKey).catch(() => null);
+  if (cached) {
+    try {
+      loaded = JSON.parse(cached) as Awaited<ReturnType<typeof loadCallContext>>;
+    } catch {
+      loaded = await loadCallContext(session.phoneNumber);
+      await redis.setex(ctxKey, 1800, JSON.stringify(loaded)).catch(() => {});
+    }
+  } else {
+    loaded = await loadCallContext(session.phoneNumber).catch(() => ({
+      customer: null,
+      cart: null,
+      primaryProductId: null,
+    }));
+    await redis.setex(ctxKey, 1800, JSON.stringify(loaded)).catch(() => {});
+  }
+
+  const recentSignals = await getRecentTurnSignals(callId, 3).catch((err) => {
+    log.warn({ err }, 'getRecentTurnSignals failed (non-fatal)');
+    return null;
+  });
+
+  // Real abandoned cart from DB when we have one; otherwise fall back to
+  // the synthetic single-product cart so the agent still has something
+  // to reference.
+  const cartContext: CartContextPayload | null =
+    loaded.cart ??
+    (product
+      ? {
+          items: [{ product_id: product.id, name: product.name, price: product.price, quantity: 1 }],
+          total: product.price,
+          abandoned_minutes_ago: null,
+        }
+      : null);
 
   const rawHistory = await getRecentHistory(callId, 4);
   const history: BrainConversationTurn[] = rawHistory.map((t) => ({
@@ -105,6 +137,8 @@ async function processTranscript(callId: string, utterance: string): Promise<voi
       product_context: productContext,
       alternative_product_context: alternativeContext,
       cart_context: cartContext,
+      customer_context: loaded.customer,
+      recent_user_signals: recentSignals,
       discounts_already_offered: session.discountsOffered,
     },
     fireVapiSayOnFirstChunk,

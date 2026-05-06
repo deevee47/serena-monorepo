@@ -48,6 +48,34 @@ export type CartContextPayload = {
   abandoned_minutes_ago?: number | null;
 };
 
+export type CustomerSegment = 'FIRST_TIME' | 'RETURNING' | 'VIP' | 'LAPSED';
+
+export type PastOrderSummaryPayload = {
+  product_id: string;
+  product_name: string;
+  price: number;
+  days_ago: number;
+};
+
+export type CustomerContextPayload = {
+  phone: string;
+  name?: string | null;
+  email?: string | null;
+  segment?: CustomerSegment;
+  lifetime_value?: number;
+  prior_calls_count?: number;
+  timezone?: string | null;
+  preferred_contact?: string | null;
+  past_orders?: PastOrderSummaryPayload[];
+};
+
+export type RecentUserSignalsPayload = {
+  sentiments: ('POSITIVE' | 'NEGATIVE' | 'NEUTRAL')[];
+  filler_density?: number | null;
+  length_trend?: number | null;
+  repeated_objection?: string | null;
+};
+
 export type ToolName = 'send_whatsapp_checkout_link' | 'send_whatsapp_product_info';
 
 export type ConverseToolCall = {
@@ -63,6 +91,8 @@ export type ConverseRequest = {
   alternative_product_context?: ProductContext | null;
   premium_product_context?: ProductContext | null;
   cart_context?: CartContextPayload | null;
+  customer_context?: CustomerContextPayload | null;
+  recent_user_signals?: RecentUserSignalsPayload | null;
   discounts_already_offered?: number[];
 };
 
@@ -74,6 +104,8 @@ export type ConverseResponse = {
 
 export type ConverseStreamEvent =
   | { type: 'text'; delta: string }
+  | { type: 'thinking'; tool: string }
+  | { type: 'observation'; name: string; args: Record<string, unknown>; result: Record<string, unknown> }
   | { type: 'tool_call'; name: ToolName; args: Record<string, unknown> }
   | { type: 'done'; finish_reason?: string | null };
 
@@ -215,16 +247,28 @@ export async function converse(req: ConverseRequest): Promise<ConverseResponse> 
 
 /**
  * SSE-streaming variant. The brain emits typed events `{type, ...}`. The
- * caller gets a callback per text delta (for Vapi /say firing) and an
+ * caller gets a callback per text delta (for Vapi /say firing), an optional
+ * callback for `thinking` events (observation-tool pre-roll), and an
  * optional finalized tool_call. Returns the assembled text and tool_call.
  *
  * On error, falls back to `converse()` for a non-streaming retry, then to
  * a generic text reply if that also fails. NEVER synthesizes a tool_call.
  */
+export interface ConverseStreamCallbacks {
+  onTextDelta: (delta: string) => void;
+  /** Fired right before an observation tool is awaited server-side. The
+   *  gateway uses this to fill the dead-air gap with a thinking-aloud filler
+   *  ("ek minute, dekh ke batati hoon —"). */
+  onThinking?: (toolName: string) => void;
+}
+
 export async function converseStream(
   req: ConverseRequest,
-  onTextDelta: (delta: string) => void,
+  callbacks: ((delta: string) => void) | ConverseStreamCallbacks,
 ): Promise<{ text: string; tool_call: ConverseToolCall | null; finish_reason: string | null }> {
+  // Backwards-compat: callers passing a bare callback get treated as onTextDelta.
+  const cb: ConverseStreamCallbacks =
+    typeof callbacks === 'function' ? { onTextDelta: callbacks } : callbacks;
   const buffer: string[] = [];
   let toolCall: ConverseToolCall | null = null;
   let finishReason: string | null = null;
@@ -268,12 +312,16 @@ export async function converseStream(
         }
         if (event.type === 'text') {
           buffer.push(event.delta);
-          onTextDelta(event.delta);
+          cb.onTextDelta(event.delta);
+        } else if (event.type === 'thinking') {
+          cb.onThinking?.(event.tool);
         } else if (event.type === 'tool_call') {
           toolCall = { name: event.name, args: event.args };
         } else if (event.type === 'done') {
           finishReason = event.finish_reason ?? null;
         }
+        // 'observation' events are info-only for the gateway (the brain
+        // already fed the result back into the LLM). We don't act on them.
       }
     }
 

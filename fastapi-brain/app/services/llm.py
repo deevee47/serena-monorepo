@@ -96,6 +96,15 @@ class ConverseObservationEvent(TypedDict):
     result: dict[str, Any]
 
 
+class ConverseThinkingEvent(TypedDict):
+    """Emitted *before* an observation tool is awaited so the gateway can
+    fire a thinking-aloud filler ('let me check —') into TTS during the
+    Postgres roundtrip. Side-effect tools don't need this — the LLM already
+    spoke a confirmation sentence before calling them."""
+    type: str  # 'thinking'
+    tool: str
+
+
 class ConverseDoneEvent(TypedDict):
     type: str  # 'done'
     finish_reason: str | None
@@ -105,6 +114,7 @@ ConverseEvent = (
     ConverseTextEvent
     | ConverseToolCallEvent
     | ConverseObservationEvent
+    | ConverseThinkingEvent
     | ConverseDoneEvent
 )
 
@@ -253,6 +263,9 @@ async def converse_response_stream(
 
                 # 2) Execute observation tools and append tool result messages.
                 for c in observation_calls:
+                    # Emit a thinking event BEFORE awaiting the DB roundtrip so
+                    # the gateway can fill the dead-air gap with a filler.
+                    yield {"type": "thinking", "tool": c["name"]}
                     try:
                         result = await run_observation_tool(c["name"], c["args"])
                     except Exception as exc:  # noqa: BLE001
