@@ -38,6 +38,7 @@ def _build_inputs(body: ConverseRequest) -> tuple[str, list[dict]]:
         premium_product_context=body.premium_product_context,
         cart_context=body.cart_context,
         customer_context=body.customer_context,
+        recent_user_signals=body.recent_user_signals,
         discounts_already_offered=body.discounts_already_offered,
         agent_name=body.agent_name,
         business_name=body.business_name,

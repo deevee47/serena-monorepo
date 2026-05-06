@@ -24,6 +24,7 @@ import {
   getSession,
   updateSession,
   appendTurn,
+  getRecentHistory,
 } from '../services/session.service.js';
 import {
   converseStream,
@@ -36,8 +37,19 @@ import {
   getProductById,
   toProductContext,
 } from '../services/product.service.js';
-import { createCallRecord, insertCallTurn } from '../services/db.service.js';
+import {
+  createCallRecord,
+  getRecentTurnSignals,
+  insertCallTurn,
+  loadCallContext,
+  type LoadedCallContext,
+} from '../services/db.service.js';
 import { classifyAnalyticsQueue } from '../queues/index.js';
+import {
+  detectFillerLanguage,
+  isDisfluencyOpener,
+  thinkingFillerFor,
+} from '../services/thinking-filler.js';
 
 interface VapiCustomLlmMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
@@ -98,17 +110,20 @@ export default async function vapiLlmRoutes(app: FastifyInstance) {
       // Find or lazily create the session. For outbound calls Vapi never
       // fires `assistant-request`, so this is the first time we see callId.
       let session = await getSession(callId);
+      let triggerProvidedProduct = false;
       if (!session) {
         const pendingRaw = await redis.get(`pending_call:${callId}`);
         let productId = 'prod-001';
         if (pendingRaw) {
           try {
             productId = (JSON.parse(pendingRaw) as { productId: string }).productId;
+            triggerProvidedProduct = true;
           } catch {
             /* ignore */
           }
         } else if (typeof body.call?.metadata?.['product_id'] === 'string') {
           productId = body.call.metadata['product_id'] as string;
+          triggerProvidedProduct = true;
         }
         const phoneNumber = body.call?.customer?.number ?? 'unknown';
         session = await createSession({ callId, phoneNumber, productId });
@@ -123,54 +138,128 @@ export default async function vapiLlmRoutes(app: FastifyInstance) {
         .find((m) => m.role === 'user' && typeof m.content === 'string');
       const utterance = lastUserMessage?.content ?? '';
 
+      // ── Live customer + cart context ───────────────────────────────────
+      // Cached per-call on Redis so we hit Postgres once per call, not once
+      // per turn. The cart loaded here is the actual abandoned cart for this
+      // phone number, not a synthetic single-product placeholder.
+      const ctxKey = `call_ctx:${callId}`;
+      let loaded: LoadedCallContext;
+      const cached = await redis.get(ctxKey).catch(() => null);
+      if (cached) {
+        try {
+          loaded = JSON.parse(cached) as LoadedCallContext;
+        } catch {
+          loaded = await loadCallContext(session.phoneNumber);
+          await redis.setex(ctxKey, 1800, JSON.stringify(loaded));
+        }
+      } else {
+        loaded = await loadCallContext(session.phoneNumber).catch((err) => {
+          log.warn({ err }, 'loadCallContext failed — falling back to empty context');
+          return { customer: null, cart: null, primaryProductId: null } as LoadedCallContext;
+        });
+        await redis.setex(ctxKey, 1800, JSON.stringify(loaded)).catch(() => {});
+      }
+
+      // If the call was triggered without an explicit product_id, prefer
+      // the customer's actually-abandoned product over the prod-001 default.
+      if (!triggerProvidedProduct && loaded.primaryProductId && session.currentProductId === 'prod-001') {
+        await updateSession(callId, { currentProductId: loaded.primaryProductId });
+        session = { ...session, currentProductId: loaded.primaryProductId };
+      }
+
       const product = getProductById(session.currentProductId);
       const productContext = product ? toProductContext(product) : null;
 
+      // Recent USER signals (sentiment streak, repeated objection, filler density,
+      // length trend). The classify-analytics worker writes sentiment async, so
+      // turn N-1's sentiment is usually in by turn N+1. Cheap query, in parallel.
       let alternativeContext = null;
       let premiumContext = null;
+      let recentSignals: Awaited<ReturnType<typeof getRecentTurnSignals>> | null = null;
+      const signalLookups: Promise<unknown>[] = [
+        getRecentTurnSignals(callId, 3)
+          .then((s) => {
+            recentSignals = s;
+          })
+          .catch((err) => {
+            log.warn({ err }, 'getRecentTurnSignals failed (non-fatal)');
+          }),
+      ];
       if (product) {
         // Cheaper + premium in parallel — both feed the prompt's anchor pattern.
-        const [cheaperRes, premiumRes] = await Promise.allSettled([
-          findAlternativeProduct(session.currentProductId, 'PRICE'),
-          findAlternativeProduct(session.currentProductId, 'PREMIUM'),
-        ]);
-        if (cheaperRes.status === 'fulfilled') alternativeContext = cheaperRes.value;
-        else log.warn({ err: cheaperRes.reason }, 'cheaper alt lookup failed (non-fatal)');
-        if (premiumRes.status === 'fulfilled') premiumContext = premiumRes.value;
-        else log.warn({ err: premiumRes.reason }, 'premium alt lookup failed (non-fatal)');
+        signalLookups.push(
+          findAlternativeProduct(session.currentProductId, 'PRICE')
+            .then((v) => {
+              alternativeContext = v;
+            })
+            .catch((err) =>
+              log.warn({ err }, 'cheaper alt lookup failed (non-fatal)'),
+            ),
+          findAlternativeProduct(session.currentProductId, 'PREMIUM')
+            .then((v) => {
+              premiumContext = v;
+            })
+            .catch((err) =>
+              log.warn({ err }, 'premium alt lookup failed (non-fatal)'),
+            ),
+        );
       }
+      await Promise.allSettled(signalLookups);
 
-      const cartContext: CartContextPayload | null = product
-        ? {
-            items: [
-              {
-                product_id: product.id,
-                name: product.name,
-                price: product.price,
-                quantity: 1,
-              },
-            ],
-            total: product.price,
-            abandoned_minutes_ago: null,
-          }
-        : null;
+      // Real abandoned cart from DB when we have one; otherwise fall back to
+      // the synthetic single-product cart so the agent still has something
+      // to reference.
+      const cartContext: CartContextPayload | null =
+        loaded.cart ??
+        (product
+          ? {
+              items: [
+                {
+                  product_id: product.id,
+                  name: product.name,
+                  price: product.price,
+                  quantity: 1,
+                },
+              ],
+              total: product.price,
+              abandoned_minutes_ago: null,
+            }
+          : null);
 
-      // Conversation history from Vapi's messages, excluding the latest user
-      // utterance (we pass that as `utterance` separately to the brain).
-      const history: BrainConversationTurn[] = body.messages
-        .filter(
-          (m) =>
-            (m.role === 'user' || m.role === 'assistant') &&
-            typeof m.content === 'string' &&
-            m.content.length > 0,
-        )
-        .slice(0, -1)
-        .slice(-HISTORY_TURNS_TO_INCLUDE)
-        .map((m) => ({
-          speaker: m.role === 'user' ? 'USER' : 'AGENT',
-          utterance: m.content as string,
-          timestamp: new Date().toISOString(),
+      // Conversation history. Prefer Redis session history (authoritative —
+      // contains the agent's actually-streamed text, including turns the
+      // customer interrupted). Fall back to Vapi's body.messages when Redis
+      // is empty (very first turn). Without this, an interrupted opener
+      // disappears from history and the LLM thinks it hasn't opened yet,
+      // causing it to re-introduce on every turn.
+      const sessionHistory = await getRecentHistory(
+        callId,
+        HISTORY_TURNS_TO_INCLUDE,
+      ).catch(() => [] as Awaited<ReturnType<typeof getRecentHistory>>);
+
+      let history: BrainConversationTurn[];
+      if (sessionHistory.length > 0) {
+        history = sessionHistory.map((t) => ({
+          speaker: t.speaker,
+          utterance: t.utterance,
+          timestamp: t.timestamp.toISOString(),
         }));
+      } else {
+        history = body.messages
+          .filter(
+            (m) =>
+              (m.role === 'user' || m.role === 'assistant') &&
+              typeof m.content === 'string' &&
+              m.content.length > 0,
+          )
+          .slice(0, -1)
+          .slice(-HISTORY_TURNS_TO_INCLUDE)
+          .map((m) => ({
+            speaker: m.role === 'user' ? 'USER' : 'AGENT',
+            utterance: m.content as string,
+            timestamp: new Date().toISOString(),
+          }));
+      }
 
       // ── Stream OpenAI-compatible SSE response ──────────────────────────
       reply.raw.writeHead(200, {
@@ -203,6 +292,12 @@ export default async function vapiLlmRoutes(app: FastifyInstance) {
       let fullText = '';
       let dispatch: ReturnType<typeof dispatchToolCall> | null = null;
 
+      // Filler language: prefer the customer's actual reply, fall back to timezone.
+      const fillerLang = detectFillerLanguage({
+        lastUtterance: utterance,
+        timezone: loaded.customer?.timezone ?? null,
+      });
+
       try {
         const result = await converseStream(
           {
@@ -213,11 +308,24 @@ export default async function vapiLlmRoutes(app: FastifyInstance) {
             alternative_product_context: alternativeContext,
             premium_product_context: premiumContext,
             cart_context: cartContext,
+            customer_context: loaded.customer,
+            recent_user_signals: recentSignals,
             discounts_already_offered: session.discountsOffered,
           },
-          (delta) => {
-            fullText += delta;
-            sendChunk({ content: delta });
+          {
+            onTextDelta: (delta) => {
+              fullText += delta;
+              sendChunk({ content: delta });
+            },
+            onThinking: (toolName) => {
+              // Suppress if the LLM already opened with its own disfluency cue —
+              // stacked "hmm — let me check —" sounds wrong.
+              if (isDisfluencyOpener(fullText)) return;
+              const filler = thinkingFillerFor(toolName, fillerLang);
+              fullText += filler;
+              sendChunk({ content: filler });
+              log.info({ tool: toolName, lang: fillerLang }, 'thinking filler sent');
+            },
           },
         );
 
