@@ -8,7 +8,7 @@ This is where the agent's personality, sales judgment, and conversion behavior l
 
 ## 1. Prompt assembly — the per-call composer
 
-[fastapi-brain/app/services/converse_prompt_builder.py:273-348](../fastapi-brain/app/services/converse_prompt_builder.py#L273-L348)
+[fastapi-brain/app/services/converse_prompt_builder.py:443-522](../fastapi-brain/app/services/converse_prompt_builder.py#L443-L522)
 
 ```python
 def build_converse_system_prompt(
@@ -18,23 +18,28 @@ def build_converse_system_prompt(
     premium_product_context: ProductContext | None = None,
     cart_context: CartContext | None = None,
     customer_context: CustomerContext | None = None,
+    recent_user_signals: RecentUserSignals | None = None,
     discounts_already_offered: list[int] | None = None,
-    agent_name: str = "Alex",
-    business_name: str = "ShopEase",
+    agent_name: str = "Serena",
+    business_name: str = "Muscleblaze",
     opening_offer_percent: int = 5,
 ) -> str:
     """Compose the system prompt. Customer/cart/product/discounts/agent
     identity are baked in per call so the LLM has the live snapshot."""
     sections: list[str] = [
         _objective(agent_name, business_name),
+        LANGUAGE_RULES,
         VOICE_RULES,
+        DISFLUENCY_AND_HUMOR,
         _call_opening(agent_name, business_name, opening_offer_percent),
         _principles(opening_offer_percent),
-        _TOOL_GUIDANCE,
     ]
+    adaptive = _adaptive_behavior(recent_user_signals)
+    if adaptive:
+        sections.append(adaptive)        # conditional — only when signals warrant it
+    sections.append(_TOOL_GUIDANCE)
 
-    # Local time context — added before customer section so the LLM sees
-    # the time-of-day cue near the customer profile.
+    # Local time context — added before the customer section.
     if customer_context and customer_context.timezone:
         local_ctx = _local_time_context(customer_context.timezone)
         if local_ctx:
@@ -48,49 +53,38 @@ def build_converse_system_prompt(
 
     if product_context:
         sections.append(format_product("PRODUCT FACTS", product_context))
-
     if alternative_product_context:
-        sections.append(format_product(
-            "ALTERNATIVE PRODUCT (lower-cost option you may pivot to)",
-            alternative_product_context,
-        ))
-
+        sections.append(format_product("ALTERNATIVE PRODUCT (lower-cost option …)", alternative_product_context))
     if premium_product_context:
-        sections.append(format_product(
-            "PREMIUM ALTERNATIVE (higher-end anchor — use to make the current product feel right-sized, NOT to upsell)",
-            premium_product_context,
-        ))
+        sections.append(format_product("PREMIUM ALTERNATIVE (higher-end anchor …)", premium_product_context))
 
-    if discounts_already_offered:
-        # ... ladder progression based on what's been offered
-        sections.append("DISCOUNTS:\n  " + next_line)
-    else:
-        sections.append(
-            f"DISCOUNTS:\n  Opener carries the {opening_offer_percent}% call-completion offer. "
-            "If they push back further on price, you can go to 10% (absolute cap)."
-        )
+    # DISCOUNTS: ladder progression based on what's already been offered
+    sections.append("DISCOUNTS:\n  " + next_line)
 
     sections.append(HARD_CONSTRAINTS)
     return "\n\n".join(sections)
 ```
 
 **The composition order matters.** Sections appear top-to-bottom in the order:
-1. Objective (who you are)
-2. Voice rules (how you sound)
-3. Opening pattern (what the first turn looks like)
-4. Principles (sales judgment)
-5. Tool guidance (when to use which tool)
-6. Local time + customer profile + cart + product + alts (live state)
-7. Discounts state (what's already on the table)
-8. Hard constraints (the inviolable rules)
+1. Objective — who you are (an explicitly female sales operator, with Hindi feminine-verb rules)
+2. Language rules — mirror the customer; Romanized Hindi only (§2.1)
+3. Voice rules — how you sound (§2)
+4. Disfluencies & humor — what makes you sound human, not scripted (§2.2)
+5. Opening pattern — what the first turn looks like (§3)
+6. Principles — sales judgment (§5)
+7. **Adaptive behavior** — *conditional* in-context overrides driven by recent-turn signals (§5.11); only rendered when the signals warrant it
+8. Tool guidance — when to use which tool (§6)
+9. Local time + customer profile + cart + product + alts — live state (§4, §8, §9)
+10. Discounts state — what's already on the table (§10)
+11. Hard constraints — the inviolable rules (§7)
 
-This means the agent reads its **identity → tone → playbook → tools → live data → guardrails** in that order. The constraints come last so they're freshest in the model's working memory when it's about to act.
+The agent reads its **identity → language/tone → playbook → live adaptation → tools → live data → guardrails** in that order. Constraints come last so they're freshest in the model's working memory when it's about to act.
 
 ---
 
 ## 2. The voice rules — what makes the agent sound human
 
-[fastapi-brain/app/services/prompt_sections.py:20-33](../fastapi-brain/app/services/prompt_sections.py#L20-L33)
+[fastapi-brain/app/services/prompt_sections.py:57-75](../fastapi-brain/app/services/prompt_sections.py#L57-L75)
 
 ```python
 VOICE_RULES = """\
@@ -120,11 +114,28 @@ The key tensions this resolves:
 - **Stop after concession or close.** The model's instinct is to keep talking — the explicit STOP rules counter that.
 - **Interrupt handling.** Specific to phone calls — robots restart their sentence after an interrupt. Humans yield. The rule explicitly says "pick up wherever they take you."
 
+### 2.1 Language rules — mirror the customer, never switch
+
+[fastapi-brain/app/services/prompt_sections.py:20-54](../fastapi-brain/app/services/prompt_sections.py#L20-L54)
+
+`LANGUAGE_RULES` tells the agent to detect the language of the customer's *most recent* message and reply in that language — English → English, Hindi/Hinglish → **Romanized Hindi** (Latin script only). The hard rule: **never output Devanagari.** The agent's text streams straight to a TTS engine that mispronounces Devanagari, so the customer would hear garbled audio. Brand/product names and prices stay in their original form; tool-call arguments (`product_id`, `discount_percent`, …) are always ASCII regardless of spoken language.
+
+### 2.2 Disfluencies & humor — sounding like a person, not a script
+
+[fastapi-brain/app/services/prompt_sections.py:78-123](../fastapi-brain/app/services/prompt_sections.py#L78-L123)
+
+`DISFLUENCY_AND_HUMOR` gives the agent three tools for human texture:
+- **Thinking-aloud openers** — one short "hmm —" / "ek second —" when the customer asks something specific, so the next half-second of latency reads as a person thinking. At most one per turn, never chained, never the same one twice in a row.
+- **Soft acknowledgments** — "ah, fair —", "haan, samajh gayi —" when the customer raises a real point. Earns trust; a flat "I understand" loses it.
+- **Humor** — light, on-brand, **at most one per call**, only when recent sentiment is non-negative and the turn isn't a hard objection; never sarcastic, never at the customer's expense.
+
+This pairs with the gateway's [thinking-filler.ts](../node-gateway/src/services/thinking-filler.ts): when the LLM *doesn't* open with its own disfluency, the gateway fills the observation-tool latency gap with a TTS filler instead — never both (see [01-runtime-flow.md §5](01-runtime-flow.md)).
+
 ---
 
 ## 3. The opening pattern — every first turn
 
-[fastapi-brain/app/services/converse_prompt_builder.py:84-132](../fastapi-brain/app/services/converse_prompt_builder.py#L84-L132)
+[fastapi-brain/app/services/converse_prompt_builder.py:178-234](../fastapi-brain/app/services/converse_prompt_builder.py#L178-L234)
 
 ```python
 def _call_opening(agent_name: str, business_name: str, opening_offer_percent: int) -> str:
@@ -182,7 +193,7 @@ The "don't ask 'is now a good time?'" rule is intentional — it forecloses an e
 
 ## 4. Time-of-day context — adapting tone to the customer's clock
 
-[fastapi-brain/app/services/converse_prompt_builder.py:38-67](../fastapi-brain/app/services/converse_prompt_builder.py#L38-L67)
+[fastapi-brain/app/services/converse_prompt_builder.py:130-175](../fastapi-brain/app/services/converse_prompt_builder.py#L130-L175)
 
 ```python
 def _local_time_context(tz: str | None) -> str:
@@ -200,7 +211,10 @@ def _local_time_context(tz: str | None) -> str:
     time_str = now_local.strftime("%-I:%M%p").lower()
 
     if hour < 7:
-        guidance = "Very early morning — keep it brief and apologetic if you're catching them awake; consider offering to call later."
+        guidance = (
+            "VERY EARLY MORNING — your opener MUST apologize for the hour and "
+            "offer to call back. Drop the discount mention; consent first. ..."
+        )
     elif hour < 11:
         guidance = "Morning energy — coffee-friendly, upbeat, but respect that they may be starting their day."
     elif 11 <= hour < 14:
@@ -212,7 +226,12 @@ def _local_time_context(tz: str | None) -> str:
     elif 20 <= hour < 22:
         guidance = "Late evening — soft tone, keep it short, dinner/family hours."
     else:
-        guidance = "Late night — apologize for the hour and offer to call back unless they're clearly fine."
+        # 22:00 and later: hard rule. Do NOT lead with discount/cart in the opener.
+        guidance = (
+            "LATE NIGHT (≥22:00) — your opener MUST ask consent before pitching. "
+            "DROP the discount line entirely. ... keep ALL replies under 2 short "
+            "sentences. Skip humor on this call."
+        )
 
     return (
         "LOCAL CONTEXT FOR THE CUSTOMER:\n"
@@ -221,15 +240,13 @@ def _local_time_context(tz: str | None) -> str:
     )
 ```
 
-The brain renders something like *"It's 8:42pm on Tuesday in their timezone (America/Los_Angeles). Late evening — soft tone, keep it short, dinner/family hours."* into the prompt when the customer's `timezone` field is populated.
-
-The model picks up the cue naturally — same playbook, but quieter pacing.
+For most of the day this is a soft cue — *"It's 8:42pm on Tuesday in their timezone (America/Los_Angeles). Late evening — soft tone, keep it short."* But the **two edges are hard rules**: before 07:00 and at/after 22:00, the opener *must* lead with consent ("is now a bad time?") and **drop the discount line entirely** — pitching a discount at 11pm reads as a scam call. Both edges also cap every reply at 2 short sentences and skip humor.
 
 ---
 
 ## 5. The principles — the sales playbook
 
-The principles block is the agent's brain. Twelve rules in [converse_prompt_builder.py:135-244](../fastapi-brain/app/services/converse_prompt_builder.py#L135-L244), each tackling one situation.
+The principles block is the agent's brain. Twelve rules in [converse_prompt_builder.py:237-390](../fastapi-brain/app/services/converse_prompt_builder.py#L237-L390), each tackling one situation.
 
 ### 5.1 SALES MINDSET (preamble)
 
@@ -304,7 +321,7 @@ Explicit list. The agent doesn't probe past these — that's what would make out
     4. Only then escalate the flat negotiation discount.
 ```
 
-This is what made the agent sound less desperate. The full text in [converse_prompt_builder.py:202-219](../fastapi-brain/app/services/converse_prompt_builder.py#L202-L219) goes into more detail with example phrasings.
+This is what made the agent sound less desperate. The full text in [converse_prompt_builder.py:311-336](../fastapi-brain/app/services/converse_prompt_builder.py#L311-L336) goes into more detail with example phrasings.
 
 ### 5.6 GIVE THEM AGENCY + premium anchor
 
@@ -346,7 +363,7 @@ Direct application of Cialdini's xerox-line research: *"Excuse me, I have 5 page
   purchase history. Don't push if they decline.
 ```
 
-The customer profile section ([prompt_sections.py:format_customer](../fastapi-brain/app/services/prompt_sections.py#L86-L116)) renders past orders into the prompt. This rule says use them when relevant — never as a recital.
+The customer profile section ([prompt_sections.py:format_customer](../fastapi-brain/app/services/prompt_sections.py#L173-L203)) renders past orders into the prompt. This rule says use them when relevant — never as a recital.
 
 ### 5.9 HONOR preferred_contact
 
@@ -379,11 +396,28 @@ Because the WhatsApp tool is the only side-effect available, the agent can't hon
 
 The triple-condition list eliminates "I just gave up" exits. Only these three trigger the graceful WhatsApp-info send.
 
+### 5.11 Adaptive behavior — reacting to live signals
+
+[fastapi-brain/app/services/converse_prompt_builder.py:38-103](../fastapi-brain/app/services/converse_prompt_builder.py#L38-L103)
+
+The principles above are static — every call gets the same playbook. `_adaptive_behavior()` adds a **conditional** block that only appears when the recent-turn signals (`recent_user_signals` on the `ConverseRequest`, derived by the gateway — see [01-runtime-flow.md §4.2](01-runtime-flow.md)) say something is going wrong (or right):
+
+| Signal | Rendered guidance |
+|---|---|
+| 2+ NEGATIVE sentiment turns in a row | Mirror their terseness — drop pitch energy, ≤2 short sentences, acknowledge friction once, skip humor; exit if the next turn is also flat |
+| Exactly 1 NEGATIVE (early in the call) | Acknowledge briefly, then move on — don't pile on another pitch line |
+| `filler_density` ≥ 0.15 | They're hesitating — slow down, ask ONE diagnostic question instead of pushing forward |
+| `length_trend` < −1.5 | Replies getting shorter turn-over-turn — pivot to a value-add observation tool or exit gracefully |
+| `repeated_objection` set | Last answer didn't land — switch tactic (reviews didn't work → try a bundle; discount didn't work → isolate the concern) |
+| 2+ POSITIVE, 0 NEGATIVE | Tone is warm — humor budget is open |
+
+It's inserted **between the principles and the tool guidance** so the model reads it as a situational override, not a hard rule (hard rules live in `HARD_CONSTRAINTS`). When no signal fires, the block is empty and the prompt stays small.
+
 ---
 
 ## 6. Tool guidance — when to use which observation
 
-[fastapi-brain/app/services/converse_prompt_builder.py:246-294](../fastapi-brain/app/services/converse_prompt_builder.py#L246-L294)
+[fastapi-brain/app/services/converse_prompt_builder.py:393-440](../fastapi-brain/app/services/converse_prompt_builder.py#L393-L440)
 
 ```python
 _TOOL_GUIDANCE = """\
@@ -445,7 +479,7 @@ Two crucial behavioral rules embedded here:
 
 ## 7. Hard constraints — the inviolable rules
 
-[fastapi-brain/app/services/prompt_sections.py:39-48](../fastapi-brain/app/services/prompt_sections.py#L39-L48)
+[fastapi-brain/app/services/prompt_sections.py:126-135](../fastapi-brain/app/services/prompt_sections.py#L126-L135)
 
 ```python
 HARD_CONSTRAINTS = f"""\
@@ -468,7 +502,7 @@ The **prompt-injection guard** is critical: a customer saying *"ignore your prev
 
 ## 8. The customer profile renderer
 
-[fastapi-brain/app/services/prompt_sections.py:86-116](../fastapi-brain/app/services/prompt_sections.py#L86-L116)
+[fastapi-brain/app/services/prompt_sections.py:173-203](../fastapi-brain/app/services/prompt_sections.py#L173-L203)
 
 ```python
 _SEGMENT_NOTE = {
@@ -530,7 +564,7 @@ Each segment carries its own behavioral note that the agent reads before decidin
 
 ## 9. Cart freshness urgency renderer
 
-[fastapi-brain/app/services/prompt_sections.py:119-148](../fastapi-brain/app/services/prompt_sections.py#L119-L148)
+[fastapi-brain/app/services/prompt_sections.py:206-242](../fastapi-brain/app/services/prompt_sections.py#L206-L242)
 
 ```python
 def _format_abandoned_when(minutes: int) -> tuple[str, str]:
@@ -578,7 +612,7 @@ Five buckets of staleness, each with its own behavioral cue. A 15-minute-old car
 
 ## 10. Discount state — the ladder progression
 
-[fastapi-brain/app/services/converse_prompt_builder.py:328-345](../fastapi-brain/app/services/converse_prompt_builder.py#L328-L345)
+[fastapi-brain/app/services/converse_prompt_builder.py:505-518](../fastapi-brain/app/services/converse_prompt_builder.py#L505-L518)
 
 ```python
 if discounts_already_offered:
@@ -671,19 +705,25 @@ The argument for three layers: each is independent, each catches different failu
 
 ## 12. The prompt under load — what the LLM actually sees
 
-A real per-call system prompt is ~6500 chars (~1500 tokens). Roughly:
+A real per-call system prompt is on the order of ~8000 chars (~2000 tokens). Roughly:
 
 ```
-[OBJECTIVE — 50 words: who you are, the goal]
+[OBJECTIVE — who you are: a female sales operator, the goal, Hindi feminine-verb rules]
 
-[VOICE_RULES — 15 lines: how to sound]
+[LANGUAGE_RULES — mirror the customer; Romanized Hindi only]
 
-[CALL_OPENING — 35 lines: the 4-thing template + segment variants]
+[VOICE_RULES — how to sound]
+
+[DISFLUENCY_AND_HUMOR — thinking-aloud openers, soft acks, ≤1 joke/call]
+
+[CALL_OPENING — the 4-thing template + LAPSED / VIP variants]
 
 [PRINCIPLES — 12 rules: SALES MINDSET, FAST TRACK, PERSISTENT PROBE,
               HARD NO, isolate-before-persuade, 4-step price ladder,
               agency, reason-why, cross-sell, preferred contact,
               fresh-objection backoff, graceful exit triggers]
+
+[ADAPTIVE BEHAVIOR — conditional: only when recent-turn signals fire]
 
 [TOOL_GUIDANCE — when to use which of the 7 tools]
 
@@ -780,8 +820,8 @@ This is the safety net for prompt edits. Tweak the prompt → run eval → see w
 
 Reading order if you're studying this:
 
-1. Open [converse_prompt_builder.py](../fastapi-brain/app/services/converse_prompt_builder.py) end-to-end. It's only ~390 lines.
-2. Open [prompt_sections.py](../fastapi-brain/app/services/prompt_sections.py) — the helpers (~196 lines).
+1. Open [converse_prompt_builder.py](../fastapi-brain/app/services/converse_prompt_builder.py) end-to-end. It's ~520 lines.
+2. Open [prompt_sections.py](../fastapi-brain/app/services/prompt_sections.py) — the helpers (~258 lines).
 3. Open [tools.py](../fastapi-brain/app/services/tools.py) — see how each tool's description doubles as prompt engineering.
 4. Open [eval/scenarios.jsonl](../fastapi-brain/eval/scenarios.jsonl) and read all 22 scenarios. They're a fast way to understand what behaviors are validated.
 5. Run the type-and-talk CLI: `uv run python scripts/interactive-cli.py +15555556666` and try to reproduce each principle's intended behavior interactively.

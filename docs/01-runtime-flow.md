@@ -17,7 +17,7 @@ Authorization: Bearer <VAPI_WEBHOOK_SECRET>
   "model": "any-string-vapi-puts-here",
   "messages": [
     { "role": "system",    "content": "<assistant system prompt from Vapi dashboard — ignored>" },
-    { "role": "assistant", "content": "Hi Sarah, this is Alex from ShopEase..." },
+    { "role": "assistant", "content": "Hi Sarah, this is Serena from Muscleblaze..." },
     { "role": "user",      "content": "the chair's a bit out of my budget" }
   ],
   "stream": true,
@@ -35,7 +35,7 @@ Vapi expects an OpenAI-format SSE response back: `data: {"choices":[{"delta":{"c
 
 ## 2. Auth check (dev-permissive)
 
-[node-gateway/src/routes/vapi-llm.ts:65-87](../node-gateway/src/routes/vapi-llm.ts#L65-L87)
+[node-gateway/src/routes/vapi-llm.ts:77-99](../node-gateway/src/routes/vapi-llm.ts#L77-L99)
 
 ```ts
 const authHeader = request.headers['authorization'] as string | undefined;
@@ -57,7 +57,7 @@ if (authHeader !== undefined) {
 
 ## 3. Lazy session creation
 
-[node-gateway/src/routes/vapi-llm.ts:98-119](../node-gateway/src/routes/vapi-llm.ts#L98-L119)
+[node-gateway/src/routes/vapi-llm.ts:112-134](../node-gateway/src/routes/vapi-llm.ts#L112-L134)
 
 ```ts
 let session = await getSession(callId);
@@ -115,44 +115,51 @@ The session stays in Redis for the call's lifetime, holds `discountsOffered` (so
 
 ## 4. Build the brain context
 
-The gateway needs to assemble what the brain calls a `ConverseRequest`: the latest utterance + history + product/cart context + any alternative products + how many discounts have been offered.
+The gateway needs to assemble what the brain calls a `ConverseRequest`: the latest utterance + history + product/cart context + alternative products + the live customer profile + recent-turn signals + how many discounts have been offered.
 
 ### 4.1 Latest utterance + history
 
-[node-gateway/src/routes/vapi-llm.ts:121-173](../node-gateway/src/routes/vapi-llm.ts#L121-L173)
+[node-gateway/src/routes/vapi-llm.ts:136-139](../node-gateway/src/routes/vapi-llm.ts#L136-L139)
 
 ```ts
 const lastUserMessage = [...body.messages]
   .reverse()
   .find((m) => m.role === 'user' && typeof m.content === 'string');
 const utterance = lastUserMessage?.content ?? '';
-
-// ...
-
-// Conversation history from Vapi's messages, excluding the latest user
-// utterance (we pass that as `utterance` separately to the brain).
-const history: BrainConversationTurn[] = body.messages
-  .filter((m) =>
-    (m.role === 'user' || m.role === 'assistant') &&
-    typeof m.content === 'string' &&
-    m.content.length > 0,
-  )
-  .slice(0, -1)
-  .slice(-HISTORY_TURNS_TO_INCLUDE)
-  .map((m) => ({
-    speaker: m.role === 'user' ? 'USER' : 'AGENT',
-    utterance: m.content as string,
-    timestamp: new Date().toISOString(),
-  }));
 ```
 
-**Why we strip the system message:** Vapi's dashboard might have a system prompt configured (we recommend leaving it empty). Even if it has content, the brain builds its own per-call system prompt from the `ConverseRequest`. Filtering by `m.role === 'user' || 'assistant'` drops it cleanly.
+The latest user message is passed to the brain as `utterance`; everything before it is `conversation_history` — two separate `ConverseRequest` fields, so the brain never double-counts the new input.
 
-**Why we slice off the latest user message:** the brain expects `utterance` (the new message) and `conversation_history` (everything before) as separate fields. Avoids duplicating the latest user input.
+**History comes from the Redis session, not Vapi's `messages[]`.** [vapi-llm.ts:229-262](../node-gateway/src/routes/vapi-llm.ts#L229-L262)
 
-### 4.2 Product + cheaper alt + premium alt (parallel Pinecone lookups)
+```ts
+const sessionHistory = await getRecentHistory(callId, HISTORY_TURNS_TO_INCLUDE)
+  .catch(() => []);
 
-[node-gateway/src/routes/vapi-llm.ts:126-141](../node-gateway/src/routes/vapi-llm.ts#L126-L141)
+let history: BrainConversationTurn[];
+if (sessionHistory.length > 0) {
+  history = sessionHistory.map((t) => ({
+    speaker: t.speaker,
+    utterance: t.utterance,
+    timestamp: t.timestamp.toISOString(),
+  }));
+} else {
+  // Fallback for the very first turn, before the Redis session has any turns:
+  // derive history from Vapi's messages[] (drops the system message, slices
+  // off the latest user utterance).
+  history = body.messages
+    .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content)
+    .slice(0, -1)
+    .slice(-HISTORY_TURNS_TO_INCLUDE)
+    .map((m) => ({ /* …USER/AGENT… */ }));
+}
+```
+
+**Why the Redis session wins:** it holds the agent's *actually-streamed* text — including turns the customer interrupted, and gateway-emitted thinking fillers. Vapi's `messages[]` can drop or reshape an interrupted opener; if the LLM doesn't see its own (partial) opener in history, it thinks it hasn't opened yet and re-introduces itself every turn. `body.messages` is only the fallback for the very first turn, when the session has no turns yet.
+
+### 4.2 Product, alternatives + recent-turn signals (one parallel batch)
+
+[node-gateway/src/routes/vapi-llm.ts:170-207](../node-gateway/src/routes/vapi-llm.ts#L170-L207)
 
 ```ts
 const product = getProductById(session.currentProductId);
@@ -160,22 +167,33 @@ const productContext = product ? toProductContext(product) : null;
 
 let alternativeContext = null;
 let premiumContext = null;
+let recentSignals = null;
+
+// One Promise.allSettled batch: recent-turn signals always, plus the
+// cheaper + premium Pinecone lookups when we have a product.
+const signalLookups: Promise<unknown>[] = [
+  getRecentTurnSignals(callId, 3)
+    .then((s) => { recentSignals = s; })
+    .catch((err) => log.warn({ err }, 'getRecentTurnSignals failed (non-fatal)')),
+];
 if (product) {
-  // Cheaper + premium in parallel — both feed the prompt's anchor pattern.
-  const [cheaperRes, premiumRes] = await Promise.allSettled([
-    findAlternativeProduct(session.currentProductId, 'PRICE'),
-    findAlternativeProduct(session.currentProductId, 'PREMIUM'),
-  ]);
-  if (cheaperRes.status === 'fulfilled') alternativeContext = cheaperRes.value;
-  else log.warn({ err: cheaperRes.reason }, 'cheaper alt lookup failed (non-fatal)');
-  if (premiumRes.status === 'fulfilled') premiumContext = premiumRes.value;
-  else log.warn({ err: premiumRes.reason }, 'premium alt lookup failed (non-fatal)');
+  signalLookups.push(
+    findAlternativeProduct(session.currentProductId, 'PRICE')
+      .then((v) => { alternativeContext = v; })
+      .catch((err) => log.warn({ err }, 'cheaper alt lookup failed (non-fatal)')),
+    findAlternativeProduct(session.currentProductId, 'PREMIUM')
+      .then((v) => { premiumContext = v; })
+      .catch((err) => log.warn({ err }, 'premium alt lookup failed (non-fatal)')),
+  );
 }
+await Promise.allSettled(signalLookups);
 ```
 
-**Why both:** the prompt has an anchoring rule — *"I can show you the [premium] for $429 if you're spec-shopping, OR the Lite for $199 — but for $349, the Pro is what most people land on."* The agent can only do that if it has both poles to anchor against.
+**Why the cheaper *and* premium alt:** the prompt has an anchoring rule — *"I can show you the [premium] for $429 if you're spec-shopping, OR the Lite for $199 — but for $349, the Pro is what most people land on."* The agent can only do that if it has both poles to anchor against.
 
-**Why `Promise.allSettled` not `Promise.all`:** if Pinecone is flaky, a failed cheaper lookup shouldn't kill the whole turn. We log the failure, continue with `null`, and the prompt builder simply omits that section.
+**Why `Promise.allSettled`:** if Pinecone is flaky, a failed alt lookup shouldn't kill the turn — we log it, continue with `null`, and the prompt builder omits that section.
+
+**Recent-turn signals** ride in the same batch. `getRecentTurnSignals(callId, 3)` ([db.service.ts](../node-gateway/src/services/db.service.ts)) reads the last 3 USER turns and derives a `RecentUserSignals` snapshot: `sentiments[]` (from the async classify-analytics tags), `filler_density`, `length_trend` (linear-regression slope of utterance lengths — negative = disengaging), and `repeated_objection` (same `objection_type` on the last two USER turns). It becomes `recent_user_signals` in the `ConverseRequest`; the brain renders it into an ADAPTIVE BEHAVIOR block — see [03-prompt-and-conversion.md](03-prompt-and-conversion.md).
 
 `getProductById` is a synchronous lookup against an in-memory `Map` that was loaded from Postgres at gateway boot:
 
@@ -209,13 +227,42 @@ export function getProductById(productId: string): Product | null {
 
 The `loadCatalog()` call happens in [app.ts](../node-gateway/src/app.ts) before the server starts listening — so by the first request, the map is populated. This replaces an older hardcoded `CATALOG` array that drifted from seed data.
 
+### 4.3 Live customer + cart context
+
+The gateway also hydrates the caller's real profile and abandoned cart — this is what makes the opener reference the *actual* cart instead of a placeholder.
+
+[node-gateway/src/routes/vapi-llm.ts:141-168](../node-gateway/src/routes/vapi-llm.ts#L141-L168)
+
+```ts
+const ctxKey = `call_ctx:${callId}`;
+const cached = await redis.get(ctxKey).catch(() => null);
+if (cached) {
+  loaded = JSON.parse(cached) as LoadedCallContext;
+} else {
+  loaded = await loadCallContext(session.phoneNumber).catch(() => ({
+    customer: null, cart: null, primaryProductId: null,
+  }));
+  await redis.setex(ctxKey, 1800, JSON.stringify(loaded));
+}
+
+// Triggered without an explicit product? Use the cart's first product.
+if (!triggerProvidedProduct && loaded.primaryProductId && session.currentProductId === 'prod-001') {
+  await updateSession(callId, { currentProductId: loaded.primaryProductId });
+  session = { ...session, currentProductId: loaded.primaryProductId };
+}
+```
+
+`loadCallContext(phoneNumber)` ([db.service.ts](../node-gateway/src/services/db.service.ts)) does the same lookup the type-and-talk CLI does: the `Customer` row, their 5 most recent purchases, and the most-recent `ABANDONED` cart with its items (plus `abandoned_minutes_ago`). The result is cached in Redis (`call_ctx:<callId>`, 30-min TTL) so Postgres is hit **once per call**, not once per turn. Unknown numbers degrade gracefully to all-nulls — the brain treats them as a first-time visitor.
+
+The customer + cart objects become `customer_context` / `cart_context` in the `ConverseRequest`. When there's no DB cart, the gateway falls back to a synthetic single-product cart so the agent still has something to reference.
+
 ---
 
 ## 5. Stream from the brain → re-stream as OpenAI chunks to Vapi
 
 This is where the gateway acts as the OpenAI translator.
 
-[node-gateway/src/routes/vapi-llm.ts:175-222](../node-gateway/src/routes/vapi-llm.ts#L175-L222)
+[node-gateway/src/routes/vapi-llm.ts:264-330](../node-gateway/src/routes/vapi-llm.ts#L264-L330)
 
 ```ts
 // ── Stream OpenAI-compatible SSE response ──────────────────────────
@@ -246,7 +293,8 @@ const sendChunk = (
 
 sendChunk({ role: 'assistant' });    // OpenAI's first chunk always announces the role
 
-// Now call into the brain, and forward every text delta as an OpenAI chunk.
+// Now call into the brain, forwarding text deltas as OpenAI chunks and
+// turning `thinking` events into TTS fillers.
 const result = await converseStream(
   {
     call_id: callId,
@@ -256,25 +304,38 @@ const result = await converseStream(
     alternative_product_context: alternativeContext,
     premium_product_context: premiumContext,
     cart_context: cartContext,
+    customer_context: loaded.customer,
+    recent_user_signals: recentSignals,
     discounts_already_offered: session.discountsOffered,
   },
-  (delta) => {
-    fullText += delta;
-    sendChunk({ content: delta });
+  {
+    onTextDelta: (delta) => {
+      fullText += delta;
+      sendChunk({ content: delta });
+    },
+    onThinking: (toolName) => {
+      // The brain is about to run an observation tool (a Postgres round-trip).
+      // Stream a short TTS filler so the customer doesn't hear dead air —
+      // unless the LLM already opened with its own disfluency cue.
+      if (isDisfluencyOpener(fullText)) return;
+      const filler = thinkingFillerFor(toolName, fillerLang);
+      fullText += filler;
+      sendChunk({ content: filler });
+    },
   },
 );
 ```
 
 **The shape conversion:**
-- The brain's `/converse/stream` emits typed events: `{ type: 'text', delta: '...' }` and (after all text streams) `{ type: 'tool_call', name, args }` and finally `{ type: 'done', finish_reason }`.
+- The brain's `/converse/stream` emits five typed event kinds: `{ type: 'text', delta }`, `{ type: 'thinking', tool }` (right before an observation-tool round-trip), `{ type: 'observation', name, args, result }`, `{ type: 'tool_call', name, args }` (side-effect tools), and `{ type: 'done', finish_reason }`.
 - Vapi expects OpenAI's chat-completions chunks: `{ choices: [{ index: 0, delta: { content: '...' }, finish_reason: null }] }`.
-- The `sendChunk` closure does this translation per text delta.
+- The `onTextDelta` callback translates `text` events into OpenAI chunks; `onThinking` turns a `thinking` event into a streamed TTS filler ("one sec, checking stock —") so the customer never hears dead air during the DB round-trip (see `thinking-filler.ts` and [ARCHITECTURE_STUDY.md §4.9](../ARCHITECTURE_STUDY.md)). It's suppressed when the LLM already opened with its own disfluency. `observation` events are informational — the gateway doesn't forward them.
 
 **Why this matters:** Vapi's TTS pipeline starts speaking on the first chunk. Streaming gives sub-second time-to-first-word, even though the full response might take 2-3s to complete.
 
 **`Promise.allSettled` and SSE:** the `converseStream` function in [brain.service.ts](../node-gateway/src/services/brain.service.ts) hits the brain's `/converse/stream` SSE endpoint, parses incoming events, and calls our `onTextDelta` callback for each. If the stream errors after partial text was sent, the gateway catches the error and emits one fallback chunk + `[DONE]`:
 
-[node-gateway/src/routes/vapi-llm.ts:246-257](../node-gateway/src/routes/vapi-llm.ts#L246-L257)
+[node-gateway/src/routes/vapi-llm.ts:354-365](../node-gateway/src/routes/vapi-llm.ts#L354-L365)
 
 ```ts
 } catch (err) {
@@ -297,7 +358,7 @@ This means **the agent NEVER goes silent on Vapi**. Worst case it says "Give me 
 
 After all text has streamed, the brain's response may include a `tool_call` event for `send_whatsapp_checkout_link` or `send_whatsapp_product_info`. The gateway dispatches it server-side:
 
-[node-gateway/src/routes/vapi-llm.ts:224-241](../node-gateway/src/routes/vapi-llm.ts#L224-L241)
+[node-gateway/src/routes/vapi-llm.ts:332-349](../node-gateway/src/routes/vapi-llm.ts#L332-L349)
 
 ```ts
 if (result.tool_call) {
@@ -367,7 +428,7 @@ If any one of those layers breaks, the others catch the rogue value. The agent l
 
 ## 7. Persist + emit `[DONE]`
 
-[node-gateway/src/routes/vapi-llm.ts:243-325](../node-gateway/src/routes/vapi-llm.ts#L243-L325)
+[node-gateway/src/routes/vapi-llm.ts:367-424](../node-gateway/src/routes/vapi-llm.ts#L367-L424)
 
 ```ts
 sendChunk({}, 'stop');
@@ -501,18 +562,21 @@ Vapi STT
 POST /vapi-llm/chat/completions
    │ ├─ auth check (permissive)
    │ ├─ lazy session create / load from Redis
-   │ ├─ extract latest utterance + history from messages[]
+   │ ├─ extract latest utterance; history from Redis session (fallback: messages[])
    │ ├─ DB-loaded product lookup (sync, in-memory map)
-   │ └─ parallel Pinecone: cheaper + premium alts
+   │ ├─ loadCallContext: live customer + abandoned cart (Redis-cached, call_ctx:)
+   │ └─ parallel batch: cheaper alt + premium alt (Pinecone) + getRecentTurnSignals
    │
    ▼
 converseStream(...) → fastapi-brain /converse/stream
    │ (see 02-data-and-tools.md and 03-prompt-and-conversion.md
    │  for what happens inside the brain)
    │
-   ◄── SSE: text deltas, then maybe tool_call, then done
+   ◄── SSE: text deltas + thinking/observation events, then maybe tool_call, then done
    │
-   ├─► sendChunk({ content }) per text delta → OpenAI-format SSE → Vapi → TTS → speaker
+   ├─► onTextDelta → sendChunk({ content }) → OpenAI-format SSE → Vapi → TTS → speaker
+   │
+   ├─► onThinking → thinking-filler.ts streams a short TTS filler ("one sec —")
    │
    ├─► dispatchToolCall(tool_call) → WhatsApp side effect, clamped to ≤10%
    │
