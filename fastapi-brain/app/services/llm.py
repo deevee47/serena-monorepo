@@ -61,18 +61,12 @@ _CONVERSE_PARAMS: dict = {
 
 MAX_TOOL_TURNS = 4  # safety cap on observation-loop iterations per user turn
 
-# Tool names that should be executed server-side and looped back to the LLM.
-# Kept here (not imported from app.services.tools) to keep llm.py importable
-# without dragging the entire tools module if it ever needs to be tested
-# independently — the side-effect/observation contract is duplicated for
-# clarity.
-_OBSERVATION_TOOL_NAMES: set[str] = {
-    "check_inventory",
-    "get_recent_purchases",
-    "get_review_summary",
-    "get_delivery_eta",
-    "get_available_offers",
-}
+# Single source of truth for observation-vs-side-effect routing. Importing
+# from tools.py here (rather than maintaining a parallel hardcoded set)
+# prevents drift — e.g. an observation tool registered in tools.py but
+# missing here would silently get routed down the side-effect path and
+# then dropped as `observation_tool_leaked_to_gateway`.
+from app.services.tools import OBSERVATION_TOOLS as _OBSERVATION_TOOL_NAMES
 
 
 class ConverseTextEvent(TypedDict):
