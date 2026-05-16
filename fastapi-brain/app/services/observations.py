@@ -188,6 +188,60 @@ async def get_delivery_eta(db: Prisma, zip_code: str, product_id: str) -> dict[s
     return {"zip_code": zip_code, "product_id": product_id, "standard_days": 5, "expedited_days": 2}
 
 
+# ─── list_products ─────────────────────────────────────────────────────────
+
+
+async def list_products(
+    db: Prisma, category: str | None = None, max_results: int = 8
+) -> dict[str, Any]:
+    """Catalog-browse helper for "what else do you have?" questions.
+
+    Returns a category summary plus a small list of products. Cheap — one
+    findMany over the (small) active-products table; counts are aggregated
+    in Python."""
+    rows = await db.product.find_many(where={"isActive": True})
+
+    # Category counts across the full active catalog.
+    counts: dict[str, int] = {}
+    for r in rows:
+        key = r.category or "(uncategorized)"
+        counts[key] = counts.get(key, 0) + 1
+    categories = [
+        {"name": name, "count": n}
+        for name, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+
+    # Filter to a category if requested. Case-insensitive so the agent can
+    # pass "office" / "Office" / "OFFICE" and still match.
+    if category:
+        wanted = category.strip().lower()
+        filtered = [r for r in rows if (r.category or "").lower() == wanted]
+    else:
+        filtered = list(rows)
+
+    # Stable ordering: category asc, then price asc (so the list reads as a
+    # natural cheap-first walk through whichever category we're in).
+    filtered.sort(key=lambda r: ((r.category or ""), float(r.price)))
+
+    products = [
+        {
+            "product_id": r.id,
+            "name": r.name,
+            "price": float(r.price),
+            "category": r.category,
+        }
+        for r in filtered[:max_results]
+    ]
+
+    return {
+        "categories": categories,
+        "products": products,
+        "total_active": len(rows),
+        "filtered_total": len(filtered),
+        "category_filter": category,
+    }
+
+
 # ─── Dispatch ──────────────────────────────────────────────────────────────
 
 
@@ -205,4 +259,6 @@ async def execute_observation_tool(
         return await get_delivery_eta(db, args["zip_code"], args["product_id"])
     if name == "get_available_offers":
         return await get_available_offers(db, args["product_id"])
+    if name == "list_products":
+        return await list_products(db, args.get("category"), args.get("max_results", 8))
     return {"error": f"unknown_observation_tool: {name}"}

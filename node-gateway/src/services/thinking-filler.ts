@@ -19,6 +19,7 @@ const FILLERS_EN: Record<string, string> = {
   get_available_offers: " let me see what I can pair with that — ",
   check_inventory: " one sec, checking stock — ",
   get_delivery_eta: " let me check the shipping — ",
+  list_products: " let me see what we have — ",
   default: " one sec — ",
 };
 
@@ -28,6 +29,7 @@ const FILLERS_HI: Record<string, string> = {
   get_available_offers: " ek minute, offers check kar rahi hoon — ",
   check_inventory: " ek second, stock dekh leti hoon — ",
   get_delivery_eta: " ek minute, delivery check karti hoon — ",
+  list_products: " ek second, batati hoon kya kya hai — ",
   default: " ek second — ",
 };
 
