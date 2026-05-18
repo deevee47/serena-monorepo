@@ -6,6 +6,7 @@ import { config } from '../config/env.js';
 import { redis } from '../lib/redis.js';
 import { prisma } from '../lib/prisma.js';
 import { AppError, ErrorCodes } from '../utils/errors.js';
+import type { VapiAssistantOverrides } from '../types/vapi.types.js';
 
 function checkAdminSecret(headers: FastifyRequest['headers']): boolean {
   const adminSecret = headers['x-admin-secret'] as string | undefined;
@@ -42,12 +43,45 @@ export default async function callsRoutes(app: FastifyInstance) {
       return reply.status(429).send({ error: { code: 'RATE_LIMITED', message: 'Call limit reached for this number today' } });
     }
 
+    // Pick voice based on the customer's timezone if we know them — Indian
+    // numbers usually answer in Hindi/Hinglish, US in English. Falls back to
+    // English when we have no record of the customer.
+    const customerRow = await prisma.customer
+      .findUnique({ where: { phone: phone_number }, select: { timezone: true } })
+      .catch(() => null);
+    const tz = customerRow?.timezone ?? null;
+    const isIndianTz = tz === 'Asia/Kolkata' || tz === 'Asia/Calcutta';
+    const voiceId = isIndianTz ? config.VAPI_VOICE_HI : config.VAPI_VOICE_EN;
+
+    const overrides: VapiAssistantOverrides = {
+      // Sales pace beats default Vapi pacing for this use case.
+      silenceTimeoutSeconds: 12,
+      responseDelaySeconds: 0.4,
+      numWordsToInterruptAssistant: 2,
+      backchannelingEnabled: true,
+      endCallPhrases: ['bye', 'goodbye', 'thank you bye', 'alvida', 'rakhti hoon'],
+    };
+    if (voiceId) {
+      // Default provider — Vapi maps the ID through 11labs/playht/azure
+      // depending on the assistant config; we let the assistant pick.
+      overrides.voice = { provider: '11labs', voiceId };
+    }
+    if (config.VAPI_CUSTOM_LLM_URL) {
+      overrides.model = {
+        provider: 'custom-llm',
+        url: config.VAPI_CUSTOM_LLM_URL,
+        model: 'serena-converse',
+        authorization: `Bearer ${config.VAPI_WEBHOOK_SECRET}`,
+      };
+    }
+
     let vapiCallId: string;
     try {
       const vapiRes = await got.post('https://api.vapi.ai/call/phone', {
         headers: { Authorization: `Bearer ${config.VAPI_API_KEY}` },
         json: {
           assistantId: config.VAPI_ASSISTANT_ID,
+          assistantOverrides: overrides,
           ...(config.VAPI_PHONE_NUMBER_ID
             ? { phoneNumberId: config.VAPI_PHONE_NUMBER_ID }
             : {}),

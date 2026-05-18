@@ -46,6 +46,37 @@ export interface CartContext {
   abandoned_minutes_ago?: number | null;
 }
 
+export type CustomerSegment = 'FIRST_TIME' | 'RETURNING' | 'VIP' | 'LAPSED';
+
+export interface PastOrderSummary {
+  product_id: string;
+  product_name: string;
+  price: number;
+  days_ago: number;
+}
+
+export interface CustomerContext {
+  phone: string;
+  name?: string | null;
+  email?: string | null;
+  segment?: CustomerSegment;
+  lifetime_value?: number;
+  prior_calls_count?: number;
+  timezone?: string | null;
+  preferred_contact?: string | null; // 'whatsapp' | 'email' | 'phone'
+  past_orders?: PastOrderSummary[];
+}
+
+export interface RecentUserSignals {
+  // Most recent USER turns first. e.g. ['NEGATIVE','NEUTRAL','NEGATIVE'].
+  sentiments: ('POSITIVE' | 'NEGATIVE' | 'NEUTRAL')[];
+  filler_density?: number | null;     // 0.0 – 1.0
+  length_trend?: number | null;       // tokens/turn slope
+  // The same objection_type repeated on consecutive turns means the agent's
+  // last answer didn't land — the prompt switches tactic.
+  repeated_objection?: string | null;
+}
+
 // ─── /classify (analytics-only under converse pipeline) ────────────────────
 
 export interface ClassifyObjectionRequest {
@@ -81,7 +112,10 @@ export interface ConverseRequest {
   conversation_history?: ConversationTurn[];
   product_context?: ProductContext | null;
   alternative_product_context?: ProductContext | null;
+  premium_product_context?: ProductContext | null;
   cart_context?: CartContext | null;
+  customer_context?: CustomerContext | null;
+  recent_user_signals?: RecentUserSignals | null;
   // The discount tiers offered earlier in this call, e.g. [] | [5] | [5, 10].
   discounts_already_offered?: number[];
 }
@@ -95,6 +129,8 @@ export interface ConverseResponse {
 // SSE event shapes returned by POST /converse/stream.
 export type ConverseStreamEvent =
   | { type: 'text'; delta: string }
+  | { type: 'thinking'; tool: string }
+  | { type: 'observation'; name: string; args: Record<string, unknown>; result: Record<string, unknown> }
   | { type: 'tool_call'; name: ToolName; args: Record<string, unknown> }
   | { type: 'done'; finish_reason?: string | null };
 

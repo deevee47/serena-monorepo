@@ -1,28 +1,45 @@
 # Serena — Voice AI Sales Agent
 
-A production-grade voice sales agent that runs on live phone calls via Vapi.
-When a customer picks up, Serena identifies their objections in real time,
-generates context-aware responses through an LLM, and adapts pitch, pricing,
-and product recommendations turn by turn.
+Serena is a production-grade voice sales agent that runs on live phone calls via
+Vapi. When a cart-abandonment customer picks up, a single function-calling LLM
+drives the whole conversation — it opens with their name, cart, and a call-completion
+offer, looks up real facts (reviews, inventory, delivery ETA, recent purchases,
+promotional offers), adapts tone to their sentiment turn by turn, and can fire a
+WhatsApp checkout link when they're ready to buy.
+
+There is **no rules engine** — sales competence lives in a system prompt + 7 tool
+schemas. The agent is **Serena**, a sales operator for **Muscleblaze**.
+
+> **New to the codebase?** Read [`ARCHITECTURE_STUDY.md`](ARCHITECTURE_STUDY.md) for the
+> system map, then [`docs/`](docs/README.md) for line-referenced code walkthroughs.
 
 ---
 
 ## Architecture
 
 ```
-Vapi (phone call) ──► Node Gateway (Fastify) ──► FastAPI Brain (Python)
-                            │                          │
-                         Redis                      OpenAI GPT-4o
-                         BullMQ                     Pinecone (vector search)
-                         Prisma ──► PostgreSQL (Neon)
+Vapi (phone call) ──► node-gateway (Bun/Fastify) ──► fastapi-brain (Python)
+   Custom LLM mode          │                              │
+                          Redis                       OpenAI GPT-4o
+                          BullMQ ──► node-worker       Pinecone (vector search)
+                          Prisma ──► PostgreSQL (Neon)
 ```
+
+Vapi runs in **Custom LLM mode**: it calls the gateway's OpenAI-compatible
+`/vapi-llm/chat/completions` adapter once per turn, the gateway routes through to
+the brain's `/converse/stream`, and the agent's text streams back as OpenAI-format
+SSE chunks.
 
 | Service | Port | Role |
 |---|---|---|
-| `node-gateway` | 3000 | Vapi webhook handler, session state, scoring, orchestration |
-| `fastapi-brain` | 8000 | Objection classifier, response generator, product search |
-| `redis` | 6379 | Session store, rate-limit counters, BullMQ job queues |
-| `node-worker` | — | BullMQ worker: post-call DB writes, analytics stubs |
+| `node-gateway` | 3000 | Vapi Custom-LLM adapter, session state, live context loading, tool dispatch, Postgres writes, outbound calls |
+| `fastapi-brain` | 8000 | Function-calling LLM orchestration, observation tools, analytics-only objection classifier, Pinecone search |
+| `node-worker` | — | BullMQ worker process: post-call DB writes, async objection tagging, analytics/CRM stubs |
+| `redis` | 6379 | Session store, BullMQ queues, rate-limit + daily call-cap counters |
+
+There is **no frontend** — Serena is a backend, server-to-server system. Postgres
+(Neon) is the durable source of truth; Pinecone holds two vector indexes
+(`voice-agent-products`, `voice-agent-objections`).
 
 ---
 
@@ -32,108 +49,141 @@ Vapi (phone call) ──► Node Gateway (Fastify) ──► FastAPI Brain (Pyth
 
 - [Bun](https://bun.sh) ≥ 1.1
 - [uv](https://docs.astral.sh/uv/) ≥ 0.4 (Python package manager)
-- [Docker](https://docs.docker.com/get-docker/) (for Redis)
+- [Docker](https://docs.docker.com/get-docker/) (for Redis + Compose)
 - A [Neon](https://neon.tech) PostgreSQL database
-- A [Vapi](https://vapi.ai) account with a phone number and assistant
+- A [Vapi](https://vapi.ai) account with a phone number and an assistant in Custom LLM mode
 - An [OpenAI](https://platform.openai.com) API key
-- A [Pinecone](https://pinecone.io) API key + index named `voice-agent-products` (dim=1536, cosine)
+- A [Pinecone](https://pinecone.io) API key + an index named `voice-agent-products` (dim=1536, cosine)
 
 ### 2. First-time setup
 
 ```bash
-# Clone and enter the repo
 git clone <repo-url> && cd serena
 
-# Copy env template and fill in secrets
+# Copy the env template and fill in secrets (see Environment Variables below)
 cp .env.example .env
-# Edit .env — required fields:
-#   DATABASE_URL, DATABASE_URL_DIRECT (Neon pooled + direct)
-#   VAPI_WEBHOOK_SECRET, VAPI_API_KEY, VAPI_ASSISTANT_ID
-#   OPENAI_API_KEY
-#   PINECONE_API_KEY
-#   INTERNAL_SERVICE_SECRET  (random string ≥32 chars)
-#   ADMIN_SECRET             (separate secret for admin API)
 
-# Install everything, run migrations, seed the DB
+# Install deps, start Redis, generate Prisma clients, run migrations, seed products
 make setup
 ```
 
-### 3. Embed products into Pinecone (one-time, re-runnable)
+`make setup` runs: `bun install` → `uv sync` → `docker-compose up -d redis` →
+`prisma generate` (JS + Python clients) → `prisma migrate deploy` → `make seed`
+(seeds the original 8 products via `scripts/seed.ts`).
+
+### 3. Seed the full demo dataset (recommended for the CLI + eval)
+
+`make seed` only loads 8 products. The interactive CLI and eval suite expect the
+full demo dataset — 43 products, 72 reviews, 10 customers across all segments with
+abandoned carts, and 26 promotional offers:
 
 ```bash
-cd fastapi-brain
-uv run python ../scripts/embed-products.py
+bun run scripts/seed-demo-data.ts   # idempotent — safe to re-run
 ```
 
-This reads products from the DB, generates OpenAI embeddings, and upserts
-them into Pinecone. Re-running is safe (idempotent).
-
-### 4. Start all services
+### 4. Embed products into Pinecone (one-time, re-runnable)
 
 ```bash
-make dev
-# Starts: redis, node-gateway, fastapi-brain, node-worker via docker-compose
+cd fastapi-brain && uv run python ../scripts/embed-products.py
 ```
 
-For local development without Docker (faster hot-reload):
+Wipes the product index, reads active products from the DB, generates OpenAI
+embeddings, and upserts them into Pinecone. Idempotent.
+
+### 5. Start all services
+
+```bash
+make dev   # docker-compose up: redis + node-gateway + fastapi-brain + node-worker
+```
+
+For local development with faster hot-reload (no Docker for the app services):
 
 ```bash
 # Terminal 1 — Redis only
 docker-compose up -d redis
 
 # Terminal 2 — Node gateway
-cd node-gateway && FASTAPI_BRAIN_URL=http://127.0.0.1:8000 bun --hot src/server.ts
+cd node-gateway && FASTAPI_BRAIN_URL=http://127.0.0.1:8000 bun run dev
 
 # Terminal 3 — FastAPI brain
 cd fastapi-brain && NODE_GATEWAY_URL=http://127.0.0.1:3000 uv run uvicorn app.main:app --reload --port 8000
 
 # Terminal 4 — BullMQ worker
-cd node-gateway && bun src/workers.ts
+cd node-gateway && bun run src/workers.ts
 ```
 
-The shared `.env` defaults use Docker service hostnames such as `fastapi-brain`
-and `node-gateway`. When you run both services directly on your host, override
-those URLs to `127.0.0.1` as shown above.
+The shared `.env` defaults to Docker service hostnames (`fastapi-brain`,
+`node-gateway`). When running both services directly on your host, override those
+URLs to `127.0.0.1` as shown. The root `bun run dev` script wraps terminals 2–3 via
+`concurrently` if you prefer one command.
 
 ---
 
 ## Running Calls
 
-### Simulate a call locally (no Vapi required)
+### Type-and-talk locally (recommended for testing response quality)
+
+```bash
+cd fastapi-brain && uv run python ../scripts/interactive-cli.py
+# or pick a specific seeded customer
+uv run python ../scripts/interactive-cli.py +15552223333
+```
+
+Loads a seeded customer + their abandoned cart and drops you into a chat with the
+real brain — real LLM call per turn, real observation tools hitting the DB.
+Commands: `/list`, `/switch <phone>`, `/state`, `/reset`, `/exit`.
+
+### Simulate a full call against the gateway (no Vapi required)
 
 ```bash
 make simulate-call
 ```
 
-This replays a scripted conversation (price objection → negotiation → close)
-against the live gateway at `localhost:3000` and prints per-turn scores,
-stage transitions, and agent responses.
-
-Override the gateway URL or webhook secret:
-
-```bash
-GATEWAY_URL=http://localhost:3000 VAPI_WEBHOOK_SECRET=your-secret bun run scripts/simulate-call.ts
-```
+Replays a scripted conversation through the full converse pipeline (cold open →
+quality concern → inventory question → price pushback → bundle accept → checkout)
+against the gateway at `localhost:3000`, polling `/debug/session/:callId` to print
+the agent's responses and session state per turn.
 
 ### Trigger a real outbound call via Vapi
 
 ```bash
-curl -X POST http://localhost:3000/admin/calls \
+curl -X POST http://localhost:3000/calls/trigger \
   -H "Content-Type: application/json" \
-  -d '{"phoneNumber": "+1234567890", "productId": "prod-001"}'
+  -H "x-admin-secret: $ADMIN_SECRET" \
+  -d '{
+        "phone_number": "+15551234567",
+        "product_id": "prod-001",
+        "trigger_reason": "cart_abandon"
+      }'
 ```
 
-The gateway enqueues the call in Redis, dials via Vapi, and handles the
-`assistant-request` webhook to spin up a session.
+`POST /calls/trigger` is gated by the `x-admin-secret` header. The body is Zod-validated:
+`phone_number` (E.164), `product_id`, and `trigger_reason` ∈
+`{cart_abandon, page_view, wishlist, manual}`; an optional `metadata` object is
+forwarded to Vapi. The gateway enforces a 3-calls-per-number-per-day cap, calls
+Vapi's `/call/phone` API with timezone-aware voice + pacing overrides, stashes
+`pending_call:<callId>` in Redis, and returns `202 { "call_id": "..." }`.
 
-### Change which product a call starts with
+If the call is triggered without an explicit `product_id` (or with `prod-001`), the
+gateway prefers the customer's actually-abandoned cart product once it loads their
+live context.
 
-Pass `productId` in the call trigger above. Valid IDs: `prod-001` through `prod-008`
-(see [Products](#products) below). You can also pass it in the Vapi call metadata:
+---
 
-```json
-{ "metadata": { "product_id": "prod-004" } }
+## Eval Suite
+
+22 canonical scenarios with two layers of scoring — heuristic invariants (right tool
+fired, opener mentions name/business/cart, forbidden phrases absent, persistent-probe
+pattern correct) and a `gpt-4o-mini` judge (1–5 with reasoning).
+
+```bash
+cd fastapi-brain && uv run python ../scripts/run-eval.py
+uv run python ../scripts/run-eval.py --scenario just_browsing_three_pushes_then_exit
+uv run python ../scripts/run-eval.py --no-judge   # skip the judge for faster iteration
 ```
+
+Output: per-scenario JSON in `eval-results/`, summary table to stdout. Run it on
+every prompt change to catch regressions.
 
 ---
 
@@ -141,52 +191,84 @@ Pass `productId` in the call trigger above. Valid IDs: `prod-001` through `prod-
 
 ### Inspect a live session
 
-While a call is running (or just after), hit the debug endpoint:
-
 ```bash
 curl http://localhost:3000/debug/session/<callId>
 ```
 
-Returns the full `CallSession` object: stage, score, objections seen,
-discounts offered, conversation history, turn count.
-
-> Available in `NODE_ENV=development` only.
+Returns the full `CallSession` (product, discounts offered, conversation history,
+turn count, `isActive`). Available in `NODE_ENV=development` only.
 
 ### Log output
 
-Both services use structured JSON logs. In dev, Fastify's pino pretty-prints them.
+Both services emit structured JSON logs (pino on the gateway, structlog on the
+brain); the gateway pretty-prints in dev. Key fields:
 
-Key fields to watch:
-- `call_id` — traces a single call across all log lines
-- `stage` — current conversation stage (INTRO → PITCH → OBJECTION → NEGOTIATION → CLOSE → END)
-- `score` — engagement score 0–100
-- `objection` — what the classifier detected (PRICE, TRUST, CONFUSION, TIMING, POSITIVE_SIGNAL, NEUTRAL)
-- `discount` — discount % offered this turn (0 if none)
+- `call_id` — traces a single call across every log line and both services
+- `objection` / `sentiment` — written **asynchronously** by the `classify-analytics`
+  worker after each turn, not on the hot path
+- `tool` / `discount` — the side-effect tool dispatched this turn and the discount applied
 
-Filter logs for a single call:
-
-```bash
-docker-compose logs -f node-gateway | grep '"call_id":"sim-123"'
-```
-
-### Check BullMQ job status
+Filter for one call:
 
 ```bash
-# See failed jobs in all queues
-curl http://localhost:3000/health   # shows queue counts if wired
+docker-compose logs -f node-gateway | grep '"call_id":"<callId>"'
 ```
 
-The `node-worker` service logs every job and alerts to stderr if the dead-letter
-queue has items (checked every 5 minutes).
+### BullMQ jobs
+
+The `node-worker` process runs four queues — `call-end-queue`, `analytics-queue`,
+`crm-queue`, `classify-analytics-queue` (all `attempts: 3`, exponential backoff). A
+dead-letter monitor logs to stderr every 5 minutes if any queue has failed jobs.
 
 ### FastAPI interactive docs
 
-```
-http://localhost:8000/docs
-```
+`http://localhost:8000/docs` — available when `ENVIRONMENT` is not `production`. You
+can exercise `/converse`, `/classify`, and `/products/alternatives` from the browser
+(all require the `X-Internal-Secret` header).
 
-Available in non-production. You can call `/classify`, `/generate`, and
-`/products/alternatives` directly from the browser.
+---
+
+## How the agent works
+
+### The 7 tools
+
+The LLM is given 7 tools, in two categories:
+
+**Side-effect tools** (end the turn; the gateway dispatches them out-of-band):
+- `send_whatsapp_checkout_link(discount_percent: 0-10)` — fires when the customer is ready to buy
+- `send_whatsapp_product_info()` — graceful exit; sends product details, no checkout link
+
+**Observation tools** (executed server-side; the result is fed back to the LLM, which
+then re-streams a response grounded in the data):
+- `check_inventory(product_id)`
+- `get_recent_purchases(product_id, days)`
+- `get_review_summary(product_id)`
+- `get_delivery_eta(zip_code, product_id)`
+- `get_available_offers(product_id)` — DB-authorized BUNDLE / QUANTITY offers
+
+Discounts are clamped to 10% in **three independent layers**: the Pydantic tool
+schema, the brain's route validation, and the gateway dispatcher.
+
+### Human-feel pacing
+
+The agent is tuned to sound like a person on a real call:
+
+- **Live customer/cart context** — `loadCallContext()` hydrates the real customer
+  profile + abandoned cart from Postgres (cached per call in Redis), so the opener
+  references the actual cart, not a placeholder.
+- **Sentiment-adaptive behavior** — `getRecentTurnSignals()` derives sentiment streaks,
+  filler density, length trend, and repeated objections from recent turns; the brain
+  renders an in-context ADAPTIVE BEHAVIOR block (soften on a negative streak, slow down
+  on hesitation, switch tactic on a repeated objection, open the humor budget on a
+  positive streak).
+- **Thinking fillers** — while an observation tool runs, the gateway streams a short
+  TTS-friendly phrase ("one sec, checking stock —") so there's no dead air.
+- **Voice tuning** — outbound calls set Vapi `assistantOverrides` (12s silence timeout,
+  0.4s response delay, 2-word interrupt threshold, backchanneling) and pick a
+  timezone-aware voice (Hindi for Indian timezones, English otherwise).
+
+See [`docs/03-prompt-and-conversion.md`](docs/03-prompt-and-conversion.md) for the
+full prompt architecture.
 
 ---
 
@@ -194,178 +276,100 @@ Available in non-production. You can call `/classify`, `/generate`, and
 
 ### Products
 
-**Where:** `node-gateway/src/services/product.service.ts` → `CATALOG` array
+The catalog lives in **Postgres**, not in code. `node-gateway` loads it into an
+in-memory map at boot via `loadCatalog()` ([`product.service.ts`](node-gateway/src/services/product.service.ts)).
 
-Each product has:
-```typescript
-{
-  id: 'prod-001',          // unique, must match DB seed
-  name: 'My Product',
-  description: 'One-line description',
-  price: 349.0,
-  category: 'Office',      // used for Pinecone category filter
-  tags: ['ergonomic', 'chair', 'office'],  // semantic search keywords
-  isActive: true,
-}
-```
+To change products:
+1. Edit [`scripts/seed.ts`](scripts/seed.ts) (the base 8) or
+   [`scripts/seed-demo-data.ts`](scripts/seed-demo-data.ts) (the full demo set).
+2. Re-run the seed script.
+3. Re-run `uv run python scripts/embed-products.py` to refresh Pinecone vectors.
+4. Restart the gateway so the in-memory catalog reloads.
 
-**After editing:**
-1. Update `prisma/seed.ts` to match (the DB is the source of truth for BullMQ records)
-2. Re-run `make seed`
-3. Re-run `uv run python scripts/embed-products.py` to refresh Pinecone vectors
-4. Restart the gateway so `CATALOG` reloads
+### Agent persona & system prompt
 
-The `CATALOG` in `product.service.ts` and the DB **must stay in sync** — the gateway
-reads products from the in-memory catalog, while Pinecone and DB are updated separately.
+**Where:** [`fastapi-brain/app/services/converse_prompt_builder.py`](fastapi-brain/app/services/converse_prompt_builder.py)
+(`build_converse_system_prompt`) and
+[`fastapi-brain/app/services/prompt_sections.py`](fastapi-brain/app/services/prompt_sections.py).
 
----
-
-### Agent Persona and System Prompt
-
-**Where:** `fastapi-brain/app/services/prompt_builder.py`
-
-The `build_system_prompt()` function assembles everything the LLM sees before
-the conversation. Key things you can change:
-
-| What | Where in the file |
+| What | Where |
 |---|---|
-| Agent name and company | Line `"You are Alex, a sales specialist for ShopEase."` |
-| Personality / tone | The sentences after the name |
-| Per-stage guidance | `STAGE_GUIDANCE` dict (one instruction per stage) |
-| Max discount cap | `MAX_DISCOUNT = 10` (percent) |
-| Discount offer rules | The `if req.discount_available > 0` block |
-| Product feature framing | The `if req.product_context:` block |
-| Safety guardrails | The final `prompt +=` block at the bottom |
+| Agent name & business | `build_converse_system_prompt(... agent_name="Serena", business_name="Muscleblaze")` |
+| Identity / persona | `_objective()` |
+| Sales playbook | `_principles()` |
+| Opening pattern | `_call_opening()` (with LAPSED / VIP variants) |
+| Voice, language, disfluencies | `VOICE_RULES`, `LANGUAGE_RULES`, `DISFLUENCY_AND_HUMOR` in `prompt_sections.py` |
+| Sentiment-adaptive overrides | `_adaptive_behavior()` |
+| Hard guardrails | `HARD_CONSTRAINTS` in `prompt_sections.py` |
 
-Example — change the agent name:
+### Promotional offers
 
-```python
-# Before
-"You are Alex, a sales specialist for ShopEase. "
+Offers are rows in the `offers` table (`BUNDLE` / `QUANTITY`), surfaced to the agent
+via the `get_available_offers` tool. Add/edit them in `scripts/seed-demo-data.ts` or
+directly in the DB — the agent only ever pitches offers the tool returns.
 
-# After
-"You are Jordan, a product advisor for TechMart. "
-```
+### LLM model & parameters
 
----
-
-### Objection Classifier Behaviour
-
-**Where:** `fastapi-brain/app/services/classifier.py`
-
-The classifier calls GPT-4o-mini with a structured output prompt that maps
-customer speech to one of: `PRICE | TRUST | CONFUSION | TIMING | POSITIVE_SIGNAL | NEUTRAL`.
-
-To change classification sensitivity or add a new objection type:
-
-1. Add the new type to `shared/contracts/brain-api.types.ts` and `node-gateway/src/types/session.types.ts`
-2. Update the classifier prompt in `classifier.py`
-3. Add a corresponding entry to `SCORE_DELTAS` in `scoring.service.ts`
-4. Add a DB row to `scoring_config` via the admin API (or seed)
-
----
-
-### Scoring Deltas (how aggressive/lenient scoring is)
-
-**Two ways to change scoring:**
-
-**Option A — Edit code (permanent):**  
-`node-gateway/src/services/scoring.service.ts` → `SCORE_DELTAS` and `REPEAT_PENALTY`
-
-**Option B — Admin API (live, no redeploy):**
-
-```bash
-# Change how much a price objection drops the score
-curl -X POST http://localhost:3000/admin/scoring-config \
-  -H "Content-Type: application/json" \
-  -H "x-admin-secret: your-admin-secret" \
-  -d '{"key": "delta_price", "value": -18}'
-```
-
-Available keys and their defaults:
-
-| Key | Default | Meaning |
-|---|---|---|
-| `delta_price` | -15 | Score drop when customer objects to price |
-| `delta_trust` | -20 | Score drop on trust/credibility objection |
-| `delta_confusion` | -10 | Score drop on confusion |
-| `delta_timing` | -12 | Score drop on timing objection |
-| `delta_positive_signal` | +12 | Score boost on positive signal |
-| `delta_neutral` | 0 | No change on neutral turn |
-| `repeat_penalty` | -10 | Extra penalty if same objection repeats |
-
-Changes take effect immediately (no restart). The gateway refreshes from DB
-every 5 minutes automatically; the admin endpoint triggers an immediate reload.
-
----
-
-### Stage Transition Logic
-
-**Where:** `node-gateway/src/services/stage.service.ts`
-
-Controls when the conversation advances from one stage to the next
-(e.g. PITCH → OBJECTION when score drops, NEGOTIATION → CLOSE when score recovers).
-Edit the thresholds and conditions here.
-
----
-
-### Discount Logic
-
-**Where:** `node-gateway/src/services/negotiation.service.ts`
-
-Controls:
-- When to offer a discount (`shouldOfferDiscount`)
-- How much to offer (`getAvailableDiscount`)
-- Whether the customer is asking for follow-up (`detectFollowUpRequest`)
-
----
-
-### LLM Model
-
-**Where:** `.env`
+Model IDs are env-driven (no code change needed):
 
 ```env
-OPENAI_MODEL=gpt-4o           # response generation
-OPENAI_CLASSIFIER_MODEL=gpt-4o-mini  # objection classification
+OPENAI_MODEL=gpt-4o                  # converse / response generation
+OPENAI_CLASSIFIER_MODEL=gpt-4o-mini  # analytics-only objection classifier
 ```
 
-Change the model without touching code. `gpt-4o-mini` is used for the
-classifier to reduce cost; `gpt-4o` is used for generating call responses.
-
-**Temperature and max tokens:**  
-`fastapi-brain/app/services/llm.py` → `_OPENAI_PARAMS` dict at the top of the file.
-
-```python
-_OPENAI_PARAMS: dict = {
-    "max_tokens": 150,   # keep responses short — this is a phone call
-    "temperature": 0.7,  # raise for more creative, lower for more predictable
-    "stream": True,
-}
-```
+Temperature, max tokens, and `tool_choice` live in `_CONVERSE_PARAMS` at the top of
+[`fastapi-brain/app/services/llm.py`](fastapi-brain/app/services/llm.py)
+(`max_tokens: 250`, `temperature: 0.7`).
 
 ---
 
-## Environment Variables Reference
+## Environment Variables
+
+Both services share the repo-root `.env` (docker-compose passes it to all
+containers). Authoritative schemas: [`node-gateway/src/config/env.ts`](node-gateway/src/config/env.ts)
+and [`fastapi-brain/app/config/settings.py`](fastapi-brain/app/config/settings.py).
+
+### Shared / database
 
 | Variable | Required | Description |
 |---|---|---|
-| `DATABASE_URL` | ✅ | Neon pooled connection string |
-| `DATABASE_URL_DIRECT` | ✅ | Neon direct connection (for migrations) |
-| `REDIS_URL` | ✅ | Redis connection URL |
-| `VAPI_WEBHOOK_SECRET` | ✅ | Bearer token Vapi sends on every webhook |
+| `DATABASE_URL` | ✅ | Neon pooled connection string (runtime) |
+| `DATABASE_URL_DIRECT` | ✅ | Neon direct connection — Prisma `directUrl`, used for migrations |
+| `REDIS_URL` | — | Redis URL. Default `redis://localhost:6379` |
+| `INTERNAL_SERVICE_SECRET` | ✅ | Shared secret for gateway ↔ brain calls (`X-Internal-Secret`) |
+
+### Node gateway
+
+| Variable | Required | Description |
+|---|---|---|
+| `PORT` | — | Gateway port. Default `3000` |
+| `NODE_ENV` | ✅ | `development` \| `production` \| `test` |
+| `LOG_LEVEL` | — | `debug` \| `info` \| `warn` \| `error`. Default `info` |
+| `FASTAPI_BRAIN_URL` | ✅ | URL the gateway uses to reach the brain |
+| `ADMIN_SECRET` | ✅ | Secret for the `x-admin-secret` header on `/calls/trigger` |
+| `VAPI_WEBHOOK_SECRET` | ✅ | Bearer secret Vapi sends on webhooks + Custom-LLM requests |
 | `VAPI_API_KEY` | ✅ | Vapi API key for outbound calls and `/say` |
-| `VAPI_ASSISTANT_ID` | ✅ | The Vapi assistant to attach to each call |
+| `VAPI_ASSISTANT_ID` | ✅ | The Vapi assistant attached to each call |
+| `VAPI_PHONE_NUMBER_ID` | — | Which registered Vapi number to dial from |
+| `VAPI_VOICE_EN` | — | Voice ID for English-timezone callers (assistant override) |
+| `VAPI_VOICE_HI` | — | Voice ID for Indian-timezone callers (assistant override) |
+| `VAPI_CUSTOM_LLM_URL` | — | Public gateway URL Vapi calls in Custom-LLM mode (ngrok / staging / prod) |
+
+### FastAPI brain
+
+| Variable | Required | Description |
+|---|---|---|
+| `ENVIRONMENT` | — | `development` \| `production` \| `test`. Default `development` |
 | `OPENAI_API_KEY` | ✅ | OpenAI API key |
-| `OPENAI_MODEL` | — | Default: `gpt-4o` |
-| `OPENAI_CLASSIFIER_MODEL` | — | Default: `gpt-4o-mini` |
+| `OPENAI_MODEL` | — | Converse model. Default `gpt-4o` |
+| `OPENAI_CLASSIFIER_MODEL` | — | Analytics classifier model. Default `gpt-4o-mini` |
+| `NODE_GATEWAY_URL` | — | URL the brain uses to reach the gateway. Default `http://127.0.0.1:3000` |
 | `PINECONE_API_KEY` | ✅ | Pinecone API key |
-| `PINECONE_INDEX_NAME` | — | Default: `voice-agent-products` |
-| `INTERNAL_SERVICE_SECRET` | ✅ | Shared secret between Node and FastAPI |
-| `ADMIN_SECRET` | ✅ | Secret for `x-admin-secret` header on admin routes |
-| `PORT` | — | Node gateway port. Default: `3000` |
-| `NODE_ENV` | ✅ | `development` or `production` |
-| `LOG_LEVEL` | — | `debug`, `info`, `warn`, `error`. Default: `info` |
-| `FASTAPI_BRAIN_URL` | ✅ | URL node-gateway uses to reach FastAPI |
+| `PINECONE_INDEX_NAME` | — | Product index. Default `voice-agent-products` |
+| `PINECONE_OBJECTIONS_INDEX_NAME` | — | Objection-classifier index. Default `voice-agent-objections` |
+| `CLASSIFIER_MODE` | — | `shadow` (run both, return LLM) \| `pinecone` (NN + LLM fallback) \| `llm`. Default `shadow` |
+| `CLASSIFIER_CONFIDENCE_THRESHOLD` | — | Default `0.78` |
+| `CLASSIFIER_TOP1_STRICT_THRESHOLD` | — | Default `0.85` |
 
 ---
 
@@ -373,44 +377,69 @@ _OPENAI_PARAMS: dict = {
 
 ```
 serena/
-├── node-gateway/          # Fastify webhook server + orchestration
+├── node-gateway/                # Bun + Fastify gateway (port 3000)
 │   └── src/
+│       ├── server.ts            # boot + listen
+│       ├── app.ts               # Fastify app: plugins, routes, catalog load
+│       ├── workers.ts           # BullMQ worker process (runs as node-worker)
 │       ├── routes/
-│       │   ├── webhook.ts         # Vapi webhook handler (main call loop)
-│       │   ├── admin.ts           # Admin API (scoring config)
-│       │   ├── calls.ts           # Outbound call trigger
-│       │   └── vapi-llm.ts        # Vapi LLM mode completions
+│       │   ├── vapi-llm.ts      # POST /vapi-llm/chat/completions — per-turn hot path
+│       │   ├── webhook.ts       # POST /webhook (Vapi lifecycle); GET /debug/session/:callId
+│       │   ├── calls.ts         # POST /calls/trigger — outbound call trigger
+│       │   └── health.ts        # GET /health
 │       ├── services/
-│       │   ├── brain.service.ts   # HTTP client to FastAPI + circuit breakers
-│       │   ├── scoring.service.ts # Score calculation + DB-backed config
-│       │   ├── stage.service.ts   # Stage transition logic
-│       │   ├── session.service.ts # Redis-backed call session
-│       │   ├── negotiation.service.ts  # Discount and follow-up logic
-│       │   └── product.service.ts      # Product catalog + Pinecone lookup
-│       ├── queues/index.ts        # BullMQ queue definitions
-│       └── workers.ts             # BullMQ worker process
+│       │   ├── brain.service.ts          # HTTP client to the brain + circuit breakers
+│       │   ├── converse-dispatcher.ts    # tool_call → side-effect routing + discount clamp
+│       │   ├── thinking-filler.ts        # TTS fillers for observation-tool latency
+│       │   ├── session.service.ts        # Redis-backed CallSession
+│       │   ├── db.service.ts             # Prisma writes, loadCallContext, getRecentTurnSignals
+│       │   ├── product.service.ts        # DB-loaded catalog + Pinecone alternative lookup
+│       │   └── whatsapp.service.ts       # WhatsApp send (demo stub — swap simulateSend to go live)
+│       ├── queues/index.ts      # BullMQ queue definitions
+│       ├── config/env.ts        # Zod-validated environment
+│       └── lib/                 # redis, prisma, rate-limit store
 │
-├── fastapi-brain/         # Python ML/LLM service
+├── fastapi-brain/               # Python + FastAPI brain (port 8000)
 │   └── app/
+│       ├── main.py              # FastAPI app: lifespan, middleware, routers
 │       ├── routes/
-│       │   ├── classify.py        # POST /classify — objection detection
-│       │   ├── generate.py        # POST /generate + /generate/stream
-│       │   └── products.py        # POST /products/alternatives
-│       └── services/
-│           ├── classifier.py      # GPT-4o-mini structured output classifier
-│           ├── llm.py             # OpenAI streaming response generator
-│           ├── prompt_builder.py  # System prompt assembly ← edit persona here
-│           └── product.py         # Pinecone vector search
+│       │   ├── converse.py      # POST /converse + POST /converse/stream
+│       │   ├── classify.py      # POST /classify — analytics-only objection classifier
+│       │   ├── products.py      # POST /products/alternatives
+│       │   └── health.py        # GET /health
+│       ├── services/
+│       │   ├── llm.py                     # OpenAI streaming + observation-tool loop
+│       │   ├── converse_prompt_builder.py # per-call system prompt assembly
+│       │   ├── prompt_sections.py         # reusable prompt blocks + formatters
+│       │   ├── tools.py                   # 7 tool schemas (Pydantic → OpenAI JSON schema)
+│       │   ├── observations.py            # 5 observation-tool implementations
+│       │   ├── signals.py                 # recent-user-signal helpers
+│       │   ├── classifier.py              # hybrid objection classifier
+│       │   ├── objection_index.py         # Pinecone NN classifier
+│       │   └── product.py                 # Pinecone product search
+│       ├── config/settings.py   # pydantic-settings environment
+│       └── eval/scenarios.jsonl # 22 canonical eval scenarios
 │
 ├── prisma/
-│   ├── schema.prisma              # DB schema (calls, turns, products, scoring_config)
-│   └── seed.ts                    # Product seed data
+│   ├── schema.prisma            # 10 models — customers, carts, products, offers, calls, call_turns, …
+│   └── migrations/              # 7 migrations
+│
+├── shared/contracts/
+│   └── brain-api.types.ts       # TypeScript mirror of the brain's request/response models
 │
 ├── scripts/
-│   ├── simulate-call.ts           # Local end-to-end call simulation
-│   └── embed-products.py          # One-time Pinecone embedding script
+│   ├── seed.ts                  # seeds the products table (the original 8)
+│   ├── seed-demo-data.ts        # full demo dataset — 43 products, customers, carts, offers
+│   ├── embed-products.py        # (re-)embed products into Pinecone
+│   ├── embed-objections.py      # embed objection examples into Pinecone
+│   ├── interactive-cli.py       # type-and-talk demo against the real brain
+│   ├── run-eval.py              # eval-suite runner (22 scenarios)
+│   └── simulate-call.ts         # end-to-end gateway simulation (no Vapi)
 │
-├── docker-compose.yml             # Dev: all services
-├── Makefile                       # setup / dev / test / seed / simulate-call
-└── .env.example                   # Copy to .env and fill in secrets
+├── docs/                        # code-walkthrough deep-dives (+ docs/history/ for archived specs)
+├── ARCHITECTURE_STUDY.md        # the system map
+├── CONVERSION_ENGINE.md         # the rules-engine → function-calling-LLM pivot
+├── docker-compose.yml           # redis + node-gateway + fastapi-brain + node-worker
+├── Makefile                     # setup / dev / test / lint / migrate / seed / simulate-call
+└── .env.example                 # copy to .env and fill in secrets
 ```
