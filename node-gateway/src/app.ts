@@ -38,7 +38,7 @@ export async function buildApp() {
   await app.register(formbody);
   await app.register(rateLimit, {
     global: true,
-    max: 100,
+    max: 300,
     timeWindow: 60_000,
     store: BunRedisStore,
     skipOnError: true,
