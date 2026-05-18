@@ -117,7 +117,7 @@ export function TalkButton({
   const [muted, setMuted] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  const [mode, setMode] = useState<CallMode>('INBOUND_PRESALES');
+  const [mode, setMode] = useState<CallMode>('OUTBOUND_RECOVERY');
   const [productId, setProductId] = useState<string>(products[0]?.id ?? '');
 
   const [activeMode, setActiveMode] = useState<CallMode | null>(null);
