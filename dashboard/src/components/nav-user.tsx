@@ -25,7 +25,7 @@ import {
 
 export function NavUser() {
   const { isMobile } = useSidebar();
-  const operator = { name: 'Ops Console', email: 'admin@fundedfriday.com' };
+  const operator = { name: 'Ops Console', email: 'admin@serena.app' };
 
   return (
     <SidebarMenu>
@@ -65,13 +65,13 @@ export function NavUser() {
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
             <DropdownMenuItem asChild>
-              <a href="https://fundedfriday.com" target="_blank" rel="noreferrer">
+              <a href="https://serena.app" target="_blank" rel="noreferrer">
                 <ShieldCheck />
-                Funded Friday site
+                Serena site
               </a>
             </DropdownMenuItem>
             <DropdownMenuItem asChild>
-              <a href="mailto:support@fundedfriday.com">
+              <a href="mailto:support@serena.app">
                 <Lifebuoy />
                 Contact support
               </a>

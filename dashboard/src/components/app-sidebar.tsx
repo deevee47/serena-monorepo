@@ -51,10 +51,10 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   return (
     <Sidebar collapsible="icon" {...props}>
       <SidebarHeader>
-        <div className="flex items-center gap-2 px-2 py-1.5">
-          <span className="size-2 shrink-0 bg-ff-orange" />
-          <span className="text-sm font-semibold tracking-tight group-data-[collapsible=icon]:hidden">
-            Serena Ops
+        <div className="flex items-center gap-2.5 px-2 py-2">
+          <span className="size-1.5 shrink-0 bg-serena-accent" />
+          <span className="text-[13px] font-medium uppercase tracking-[0.28em] text-foreground/90 group-data-[collapsible=icon]:hidden">
+            Serena
           </span>
         </div>
       </SidebarHeader>

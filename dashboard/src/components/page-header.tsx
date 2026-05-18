@@ -1,5 +1,6 @@
 import { Fragment, type ReactNode } from 'react';
 import Link from 'next/link';
+import { LiveCallsIndicator } from '@/components/live-calls-indicator';
 import { ThemeToggle } from '@/components/theme-toggle';
 import {
   Breadcrumb,
@@ -73,6 +74,7 @@ export function PageHeader({
         ) : null}
       </div>
       {action ? <div className="flex items-center">{action}</div> : null}
+      <LiveCallsIndicator />
       <ThemeToggle />
     </header>
   );

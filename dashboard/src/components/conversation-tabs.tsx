@@ -13,7 +13,7 @@ import { cn } from '@/lib/utils';
 interface ConversationTabsProps {
   turns: TranscriptTurn[];
   emptyHint?: string;
-  /** Optional WhatsApp copy header (e.g. "Funded Friday call — John Doe — 17 May 2026"). */
+  /** Optional WhatsApp copy header (e.g. "Serena call — John Doe — 17 May 2026"). */
   copyHeader?: string;
   /** When true the card becomes a flex column that fills its parent's
    *  height; only the chat / transcript body scrolls. Used by the cockpit
@@ -73,7 +73,7 @@ export function ConversationTabs({
         <CardHeader className="flex flex-row items-center justify-between gap-3">
           <CardTitle>Conversation ({turns.length})</CardTitle>
           <div className="flex items-center gap-2">
-            <CopyTranscriptButton turns={turns} header={copyHeader} agentLabel="Maya" />
+            <CopyTranscriptButton turns={turns} header={copyHeader} agentLabel="Sera" />
             <TabsList>
               <TabsTrigger value="chat">Chat</TabsTrigger>
               <TabsTrigger value="transcript">Transcript</TabsTrigger>
