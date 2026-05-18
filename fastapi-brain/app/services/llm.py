@@ -61,18 +61,12 @@ _CONVERSE_PARAMS: dict = {
 
 MAX_TOOL_TURNS = 4  # safety cap on observation-loop iterations per user turn
 
-# Tool names that should be executed server-side and looped back to the LLM.
-# Kept here (not imported from app.services.tools) to keep llm.py importable
-# without dragging the entire tools module if it ever needs to be tested
-# independently — the side-effect/observation contract is duplicated for
-# clarity.
-_OBSERVATION_TOOL_NAMES: set[str] = {
-    "check_inventory",
-    "get_recent_purchases",
-    "get_review_summary",
-    "get_delivery_eta",
-    "get_available_offers",
-}
+# Single source of truth for observation-vs-side-effect routing. Importing
+# from tools.py here (rather than maintaining a parallel hardcoded set)
+# prevents drift — e.g. an observation tool registered in tools.py but
+# missing here would silently get routed down the side-effect path and
+# then dropped as `observation_tool_leaked_to_gateway`.
+from app.services.tools import OBSERVATION_TOOLS as _OBSERVATION_TOOL_NAMES
 
 
 class ConverseTextEvent(TypedDict):
@@ -96,6 +90,15 @@ class ConverseObservationEvent(TypedDict):
     result: dict[str, Any]
 
 
+class ConverseThinkingEvent(TypedDict):
+    """Emitted *before* an observation tool is awaited so the gateway can
+    fire a thinking-aloud filler ('let me check —') into TTS during the
+    Postgres roundtrip. Side-effect tools don't need this — the LLM already
+    spoke a confirmation sentence before calling them."""
+    type: str  # 'thinking'
+    tool: str
+
+
 class ConverseDoneEvent(TypedDict):
     type: str  # 'done'
     finish_reason: str | None
@@ -105,6 +108,7 @@ ConverseEvent = (
     ConverseTextEvent
     | ConverseToolCallEvent
     | ConverseObservationEvent
+    | ConverseThinkingEvent
     | ConverseDoneEvent
 )
 
@@ -253,6 +257,9 @@ async def converse_response_stream(
 
                 # 2) Execute observation tools and append tool result messages.
                 for c in observation_calls:
+                    # Emit a thinking event BEFORE awaiting the DB roundtrip so
+                    # the gateway can fill the dead-air gap with a filler.
+                    yield {"type": "thinking", "tool": c["name"]}
                     try:
                         result = await run_observation_tool(c["name"], c["args"])
                     except Exception as exc:  # noqa: BLE001

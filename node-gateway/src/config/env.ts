@@ -14,6 +14,13 @@ const envSchema = z.object({
   VAPI_ASSISTANT_ID: z.string().min(1),
   VAPI_PHONE_NUMBER_ID: z.string().min(1).optional(),
   VAPI_PUBLIC_KEY: z.string().min(1).optional(),
+  // Voice IDs Vapi resolves through its TTS provider. Optional — when unset,
+  // assistantOverrides won't include a voice and the assistant's default wins.
+  VAPI_VOICE_EN: z.string().min(1).optional(),
+  VAPI_VOICE_HI: z.string().min(1).optional(),
+  // The Custom-LLM URL Vapi calls instead of OpenAI. Optional — only set when
+  // the gateway is publicly reachable (ngrok / staging / prod).
+  VAPI_CUSTOM_LLM_URL: z.string().url().optional(),
   FASTAPI_BRAIN_URL: z.string().url(),
   INTERNAL_SERVICE_SECRET: z.string().min(1),
   ADMIN_SECRET: z.string().min(1),

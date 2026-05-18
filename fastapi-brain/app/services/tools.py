@@ -78,6 +78,23 @@ class GetAvailableOffersArgs(BaseModel):
     )
 
 
+class ListProductsArgs(BaseModel):
+    category: str | None = Field(
+        default=None,
+        description=(
+            "Optional category filter (e.g. 'Office', 'Nutrition', 'Apparel'). "
+            "Case-insensitive. Omit to get a high-level overview across all "
+            "categories."
+        ),
+    )
+    max_results: int = Field(
+        default=8,
+        ge=1,
+        le=20,
+        description="Maximum number of products to return in the list. Default 8.",
+    )
+
+
 # Tool name → its Pydantic args model.
 TOOL_ARG_MODELS: dict[str, type[BaseModel]] = {
     "send_whatsapp_checkout_link": SendCheckoutLinkArgs,
@@ -87,6 +104,7 @@ TOOL_ARG_MODELS: dict[str, type[BaseModel]] = {
     "get_review_summary": GetReviewSummaryArgs,
     "get_delivery_eta": GetDeliveryEtaArgs,
     "get_available_offers": GetAvailableOffersArgs,
+    "list_products": ListProductsArgs,
 }
 
 ToolName = Literal[
@@ -97,6 +115,7 @@ ToolName = Literal[
     "get_review_summary",
     "get_delivery_eta",
     "get_available_offers",
+    "list_products",
 ]
 
 # Side-effect tools end the LLM turn — gateway dispatches, no result back.
@@ -112,6 +131,7 @@ OBSERVATION_TOOLS: set[str] = {
     "get_review_summary",
     "get_delivery_eta",
     "get_available_offers",
+    "list_products",
 }
 
 
@@ -220,6 +240,27 @@ OPENAI_TOOLS: list[dict[str, Any]] = [
                 "discount ladder. Do NOT invent an offer the tool didn't return."
             ),
             "parameters": GetAvailableOffersArgs.model_json_schema(),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_products",
+            "description": (
+                "Browse the catalog. Use ONLY when the customer asks broadly "
+                "about what you sell — 'what else do you have?', 'do you have "
+                "any protein / chairs / apparel?', 'what kinds of products do "
+                "you carry?'. Returns "
+                "{ categories: [{name, count}], products: [{product_id, name, "
+                "price, category}], total_active: int }. Pass `category` to "
+                "filter to one section (case-insensitive). DO NOT use this for "
+                "the standard pivot — the prompt already gives you ALTERNATIVE "
+                "PRODUCT / PREMIUM ALTERNATIVE for the current product's "
+                "category. DO NOT read the full list verbatim — summarize "
+                "('yeah, we've got chairs, proteins, and a few apparel pieces — "
+                "anything in particular?')."
+            ),
+            "parameters": ListProductsArgs.model_json_schema(),
         },
     },
 ]

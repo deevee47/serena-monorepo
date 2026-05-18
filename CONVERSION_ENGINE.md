@@ -9,17 +9,24 @@
 ## Architecture
 
 ```
-USER utterance (Vapi transcript event)
-    │
+USER utterance
+    │  Vapi (Custom LLM mode) POSTs it per-turn to:
     ▼
-node-gateway/processTranscript
+node-gateway  POST /vapi-llm/chat/completions
+    │  (the OpenAI-compatible adapter. Vapi's transcript webhook events
+    │   still arrive on /webhook but are intentionally ignored.)
     │
-    ├──► /converse/stream  (single OpenAI chat.completions call with tools)
-    │       inputs: history + system prompt (voice rules + sales principles +
-    │               product/cart facts + tool schemas)
-    │       output: SSE events {type:'text'|'tool_call'|'done'}
+    ├──► load live customer + abandoned-cart context + recent-turn signals
     │
-    ├──► first text delta → POST Vapi /say (low time-to-first-word)
+    ├──► /converse/stream  (single OpenAI chat.completions call with 7 tools)
+    │       inputs: history + system prompt (voice/language/disfluency rules +
+    │               sales principles + adaptive-behavior block + product/cart/
+    │               customer facts + tool schemas)
+    │       output: SSE events {type:'text'|'thinking'|'observation'|'tool_call'|'done'}
+    │
+    ├──► text deltas → re-streamed to Vapi as OpenAI chunks (low time-to-first-word)
+    │
+    ├──► thinking event → thinking-filler.ts streams a short TTS filler
     │
     ├──► tool_call event → converse-dispatcher → whatsapp.service.ts
     │       silent clamp on discount_percent ∈ [0, 10]
@@ -27,7 +34,7 @@ node-gateway/processTranscript
     └──► persist USER+AGENT turns to Postgres
             ├── AGENT row gets `tool_called`, `tool_args` if any
             └── enqueue `classify-analytics` BullMQ job for the USER row
-                  (background classifier writes objection_type/subtype later)
+                  (background classifier writes objection_type/sentiment later)
 ```
 
 **Single LLM call per turn.** The model decides whether to talk, call a tool,
@@ -42,9 +49,9 @@ or both. No rules engine. No tactic library. Sales competence lives in a
 
 | File | Purpose |
 |---|---|
-| [app/services/converse_prompt_builder.py](fastapi-brain/app/services/converse_prompt_builder.py) | Builds the per-call system prompt (objective + voice + principles + tool guidance + cart/product/discount facts + hard constraints) |
-| [app/services/prompt_sections.py](fastapi-brain/app/services/prompt_sections.py) | Reusable helpers: `VOICE_RULES`, `HARD_CONSTRAINTS`, `format_product`, `format_cart`, `build_chat_messages` |
-| [app/services/tools.py](fastapi-brain/app/services/tools.py) | Two tools, Pydantic-validated: `send_whatsapp_checkout_link(discount_percent: 0-10)` and `send_whatsapp_product_info()` |
+| [app/services/converse_prompt_builder.py](fastapi-brain/app/services/converse_prompt_builder.py) | Builds the per-call system prompt (objective + language/voice/disfluency rules + opening + principles + adaptive-behavior block + tool guidance + customer/cart/product/discount facts + hard constraints) |
+| [app/services/prompt_sections.py](fastapi-brain/app/services/prompt_sections.py) | Reusable helpers: `LANGUAGE_RULES`, `VOICE_RULES`, `DISFLUENCY_AND_HUMOR`, `HARD_CONSTRAINTS`, `format_product`, `format_cart`, `format_customer`, `build_chat_messages` |
+| [app/services/tools.py](fastapi-brain/app/services/tools.py) | All 7 tool schemas, Pydantic-validated — 2 side-effect (`send_whatsapp_checkout_link`, `send_whatsapp_product_info`) + 5 observation (`check_inventory`, `get_recent_purchases`, `get_review_summary`, `get_delivery_eta`, `get_available_offers`) |
 | [app/services/llm.py](fastapi-brain/app/services/llm.py) | `converse_response_stream` yields typed events; tool args are accumulated server-side and emitted as one parsed `tool_call` event |
 | [app/routes/converse.py](fastapi-brain/app/routes/converse.py) | `POST /converse` and `POST /converse/stream`. Validates LLM tool args via Pydantic and silently drops malformed calls (logged) |
 | [app/services/classifier.py](fastapi-brain/app/services/classifier.py) | Pinecone hybrid classifier — runs **only** as analytics from a BullMQ worker now, never in the response path |
@@ -54,7 +61,8 @@ or both. No rules engine. No tactic library. Sales competence lives in a
 
 | File | Purpose |
 |---|---|
-| [src/routes/webhook.ts](node-gateway/src/routes/webhook.ts) | Single `processTranscript` path: build `ConverseRequest` → `converseStream` → fire Vapi `/say` on first text delta → dispatch any tool → persist turns → enqueue analytics |
+| [src/routes/vapi-llm.ts](node-gateway/src/routes/vapi-llm.ts) | The per-turn hot path (Vapi Custom LLM mode): load session + live customer/cart context + recent-turn signals → build `ConverseRequest` → `converseStream` → re-stream text deltas as OpenAI chunks, emit thinking fillers → dispatch any side-effect tool → persist turns → enqueue `classify-analytics` |
+| [src/routes/webhook.ts](node-gateway/src/routes/webhook.ts) | Vapi lifecycle events (`assistant-request`, `end-of-call-report`). Transcript events arrive here too but are intentionally ignored under Custom LLM mode. `GET /debug/session/:callId` (dev) |
 | [src/services/brain.service.ts](node-gateway/src/services/brain.service.ts) | `converse()` and `converseStream()` clients with Opossum circuit breakers. **Fallback returns text-only** — never synthesizes a tool call (would risk a real WhatsApp send on a brain outage) |
 | [src/services/converse-dispatcher.ts](node-gateway/src/services/converse-dispatcher.ts) | Tool-name → side-effect routing. Belt-and-suspenders silent clamp on `discount_percent` |
 | [src/services/whatsapp.service.ts](node-gateway/src/services/whatsapp.service.ts) | Demo `sendCheckoutLinkOnWhatsApp` and `sendProductInfoOnWhatsApp`. Logs structured events; swap `simulateSend` for a real WhatsApp Business API call when ready |
@@ -91,6 +99,32 @@ classify-analytics queue/worker, and tests.
 
 ---
 
+## Human-feel pacing (latest)
+
+On top of the converse pipeline, the `feat/human-feel-pacing` branch added a
+layer that makes the agent sound like a person rather than a competent bot:
+
+- **Live context** — the gateway loads the caller's real customer profile +
+  abandoned cart (`db.service.ts:loadCallContext`, cached in Redis) and a
+  recent-turn signal snapshot (`getRecentTurnSignals`: sentiment streak, filler
+  density, length trend, repeated objection), and passes both to the brain.
+- **Adaptive behavior** — `converse_prompt_builder._adaptive_behavior()` renders
+  those signals into an in-context ADAPTIVE BEHAVIOR block (soften on a negative
+  streak, slow down on hesitation, switch tactic on a repeated objection).
+- **Thinking fillers** — the brain emits a `thinking` SSE event before an
+  observation-tool round-trip; `thinking-filler.ts` streams a short TTS phrase
+  ("one sec, checking stock —") so there's no dead air.
+- **Voice tuning** — outbound calls set Vapi `assistantOverrides` (silence
+  timeout, response delay, interrupt threshold, backchanneling) and a
+  timezone-aware voice.
+- **New prompt blocks** — `LANGUAGE_RULES` (Romanized Hindi only — TTS garbles
+  Devanagari) and `DISFLUENCY_AND_HUMOR`, plus an explicitly female agent identity.
+
+See [ARCHITECTURE_STUDY.md §4.9](ARCHITECTURE_STUDY.md) and
+[docs/03-prompt-and-conversion.md](docs/03-prompt-and-conversion.md) for detail.
+
+---
+
 ## Running locally
 
 ### Type-and-talk (recommended for testing response quality)
@@ -115,7 +149,7 @@ Commands inside: `/list`, `/switch <phone>`, `/state`, `/reset`, `/exit`.
 
 ### Eval suite
 
-15 canonical scenarios with two layers of scoring (heuristic invariants +
+22 canonical scenarios with two layers of scoring (heuristic invariants +
 LLM judge). Run on prompt changes to catch regressions:
 
 ```bash
@@ -129,8 +163,8 @@ uv run python ../scripts/run-eval.py --no-judge
 ```
 
 Output: per-scenario JSON in `eval-results/eval-{timestamp}.json`, summary
-table to stdout. Baseline at the time of the converse-pipeline ship:
-**14/15 heuristics pass (93%), judge avg 3.67/5**.
+table to stdout. Baseline after the conversion-focus pass: **22/22 heuristics
+passing**.
 
 ### Full stack (only needed for real Vapi calls)
 
@@ -181,6 +215,7 @@ data.
 | `get_recent_purchases(product_id, days)` | Honest social proof | `{count, days}` |
 | `get_review_summary(product_id)` | "Is it any good?" / quality concern | `{count, avg_rating, top_positive_quote, top_critical_quote}` |
 | `get_delivery_eta(zip_code, product_id)` | Shipping lever / "how soon?" | `{standard_days, expedited_days}` |
+| `get_available_offers(product_id)` | Price concern — before any flat discount | `{offers: [{type, discount_percent, short_pitch, …}]}` (DB-authorized BUNDLE / QUANTITY offers) |
 
 The brain runs observation tools inline (Prisma queries against the seeded
 DB), then re-streams from OpenAI with the tool result appended to the
@@ -194,19 +229,24 @@ signatures are the contract.
 
 ## Streaming protocol
 
-`POST /converse/stream` returns SSE events:
+`POST /converse/stream` returns SSE events — five types: `text`, `thinking`,
+`observation`, `tool_call`, `done`:
 
 ```
 data: {"type":"text","delta":"Got it."}
-data: {"type":"text","delta":" If price weren't an issue..."}
+data: {"type":"thinking","tool":"get_review_summary"}
+data: {"type":"observation","name":"get_review_summary","args":{...},"result":{...}}
+data: {"type":"text","delta":" 4.7 stars from 142 buyers — "}
 data: {"type":"tool_call","name":"send_whatsapp_checkout_link","args":{"discount_percent":5}}
 data: {"type":"done","finish_reason":"tool_calls"}
 ```
 
 OpenAI streams tool args as JSON fragments; `converse_response_stream`
 accumulates them server-side and emits one fully-parsed `tool_call` event.
-Gateway fires Vapi `/say` only on `text` events, dispatches tools only on
-`tool_call` events.
+The `thinking` event fires before an observation-tool round-trip (the gateway
+turns it into a TTS filler), `observation` carries the tool result. The gateway
+re-streams `text` deltas to Vapi as OpenAI chunks and dispatches side-effect
+tools only on `tool_call` events.
 
 ---
 
