@@ -52,6 +52,19 @@ enum OfferType {
   QUANTITY // "buy N+ of this product for Y% off"
 }
 
+enum OverallSentiment {
+  POSITIVE
+  NEUTRAL
+  NEGATIVE
+  MIXED
+}
+
+enum InsightStatus {
+  PENDING
+  READY
+  FAILED
+}
+
 model Customer {
   id                  String          @id @default(uuid())
   phone               String          @unique // E.164
@@ -150,12 +163,39 @@ model Call {
   discountGiven   Int         @default(0) @map("discount_given")
   stageReached    String?     @map("stage_reached")
   productId       String?     @map("product_id")
+  recordingUrl       String?    @map("recording_url")
+  stereoRecordingUrl String?    @map("stereo_recording_url")
 
-  customer Customer?  @relation(fields: [customerId], references: [id])
+  customer Customer?    @relation(fields: [customerId], references: [id])
   turns    CallTurn[]
+  insight  CallInsight?
 
   @@index([customerId])
   @@map("calls")
+}
+
+model CallInsight {
+  callId              String           @id @map("call_id")
+  status              InsightStatus    @default(PENDING)
+  summary             String           @default("")
+  overallSentiment    OverallSentiment @default(NEUTRAL) @map("overall_sentiment")
+  emotions            String[]         @default([])
+  sentimentTrend      String           @default("stable") @map("sentiment_trend")
+  sentimentConfidence Float            @default(0) @map("sentiment_confidence")
+  serviceConcerns     Json             @default("[]") @map("service_concerns")
+  tags                Json             @default("[]")
+  modelUsed           String?          @map("model_used")
+  fallbackUsed        Boolean          @default(false) @map("fallback_used")
+  promptTokens        Int?             @map("prompt_tokens")
+  completionTokens    Int?             @map("completion_tokens")
+  retryCount          Int              @default(0) @map("retry_count")
+  errorMessage        String?          @map("error_message")
+  generatedAt         DateTime         @default(now()) @updatedAt @map("generated_at")
+
+  call Call @relation(fields: [callId], references: [callId])
+
+  @@index([status])
+  @@map("call_insights")
 }
 
 model CallTurn {
@@ -173,9 +213,10 @@ model CallTurn {
   discountOffered  Int?       @map("discount_offered")
   // Tool attribution under the converse pipeline. Only set on AGENT turns
   // when the LLM picked a tool. Null for text-only turns and USER turns.
-  toolCalled       String?    @map("tool_called")
-  toolArgs         Json?      @map("tool_args")
-  createdAt        DateTime   @default(now()) @map("created_at")
+  toolCalled         String?    @map("tool_called")
+  toolArgs           Json?      @map("tool_args")
+  observationsCalled Json?      @map("observations_called")
+  createdAt          DateTime   @default(now()) @map("created_at")
   call             Call       @relation(fields: [callId], references: [callId])
 
   @@index([callId])

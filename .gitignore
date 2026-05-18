@@ -1,30 +1,42 @@
+# ── Dependencies ────────────────────────────────────────────────────────────
 node_modules
 __pycache__
-.env
-dist
 .venv
-*.pyc
-.DS_Store
+.cache
 *.egg-info
+*.pyc
+
+# ── Env / secrets ───────────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── Build output ────────────────────────────────────────────────────────────
+dist
+out
+/build
+/.next/
+/generated/prisma
+*.tsbuildinfo
+
+# ── Tooling caches ──────────────────────────────────────────────────────────
+.turbo
+.eslintcache
 .pytest_cache
 coverage
-.turbo
-*.log
+*.lcov
+
+# ── Lockfiles for package managers we don't use (Bun owns bun.lock) ────────
 package-lock.json
 yarn.lock
-out
-*.tgz
-*.lcov
-.eslintcache
-.cache
-*.tsbuildinfo
+
+# ── Editor / OS ─────────────────────────────────────────────────────────────
+.DS_Store
 .idea
+*.log
+*.tgz
 
-/generated/prisma
-
-/generated/prisma
-
+# ── Local-only docs / artifacts ─────────────────────────────────────────────
 BUILD_GUIDE.md
 CLAUDE.md
-# Per-run eval output
 eval-results/

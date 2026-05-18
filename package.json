@@ -3,9 +3,12 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "workspaces": ["node-gateway"],
+  "workspaces": ["node-gateway", "dashboard"],
   "scripts": {
     "dev": "bun run db:generate && concurrently --kill-others-on-fail \"FASTAPI_BRAIN_URL=http://127.0.0.1:8000 bun run --cwd node-gateway dev\" \"cd fastapi-brain && NODE_GATEWAY_URL=http://127.0.0.1:3000 uv run uvicorn app.main:app --reload --port 8000\"",
+    "dev:all": "bash scripts/dev-all.sh",
+    "dashboard:dev": "bun run --cwd dashboard dev",
+    "dashboard:build": "bun run --cwd dashboard build",
     "lint": "bun run --cwd node-gateway lint",
     "test": "bun run --cwd node-gateway test && cd fastapi-brain && NODE_GATEWAY_URL=http://127.0.0.1:3000 uv run pytest",
     "typecheck": "bun run --cwd node-gateway typecheck",

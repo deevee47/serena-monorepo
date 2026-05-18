@@ -13,6 +13,7 @@ const envSchema = z.object({
   VAPI_API_KEY: z.string().min(1),
   VAPI_ASSISTANT_ID: z.string().min(1),
   VAPI_PHONE_NUMBER_ID: z.string().min(1).optional(),
+  VAPI_PUBLIC_KEY: z.string().min(1).optional(),
   FASTAPI_BRAIN_URL: z.string().url(),
   INTERNAL_SERVICE_SECRET: z.string().min(1),
   ADMIN_SECRET: z.string().min(1),
