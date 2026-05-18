@@ -478,9 +478,9 @@ export function LiveTail({
               ) : null}
               <CopyTranscriptButton
                 turns={allTurns}
-                agentLabel="Maya"
+                agentLabel="Sera"
                 header={[
-                  'Funded Friday call',
+                  'Serena call',
                   initial?.persisted.customerName ?? initial?.persisted.phoneNumber ?? null,
                   new Date().toLocaleString(),
                 ]

@@ -9,7 +9,6 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { PageHeader } from '@/components/page-header';
 import { loadActiveCalls } from '@/lib/db-queries';
@@ -25,12 +24,6 @@ export default async function LivePage() {
       <PageHeader
         title="Live"
         description="Calls currently in flight (no end-of-call report yet)."
-        action={
-          <Badge variant="ff" className="text-xs">
-            <Broadcast className="mr-1 size-3 animate-pulse" />
-            {calls.length} in flight
-          </Badge>
-        }
       />
       <div className="p-6">
         <Card>

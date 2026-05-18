@@ -127,7 +127,9 @@ export default async function LoginPage({
                 Live · Secure channel
               </span>
             </div>
-            <CardTitle className="text-2xl">Funded Friday Ops</CardTitle>
+            <CardTitle className="text-2xl font-light uppercase tracking-[0.28em]">
+              Serena
+            </CardTitle>
             <CardDescription>
               Sign in to view calls and trigger outbound dials.
             </CardDescription>

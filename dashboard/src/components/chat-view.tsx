@@ -33,7 +33,7 @@ export function ChatView({
   thinking = false,
   thinkingTool,
   emptyHint,
-  agentLabel = 'Maya',
+  agentLabel = 'Sera',
   callerLabel = 'Caller',
   fill = false,
 }: ChatViewProps) {

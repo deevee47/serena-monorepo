@@ -2,73 +2,88 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* ─── Serena · Graphite + Platinum palette ──────────────────────────────────
+   Cool architectural luxury. Graphite anchors, off-white surfaces, a single
+   muted platinum-blue accent. Hue 240 (cool) holds across both modes so the
+   palette doesn't drift warm under dark mode. */
+
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
+  --background: oklch(0.985 0.003 240);
+  --foreground: oklch(0.18  0.012 240);
   --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
+  --card-foreground: oklch(0.18  0.012 240);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --destructive-foreground: oklch(0.985 0 0);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
+  --popover-foreground: oklch(0.18  0.012 240);
+  --primary: oklch(0.22  0.012 240);
+  --primary-foreground: oklch(0.985 0.003 240);
+  --secondary: oklch(0.955 0.005 240);
+  --secondary-foreground: oklch(0.22  0.012 240);
+  --muted: oklch(0.95  0.005 240);
+  --muted-foreground: oklch(0.50  0.012 240);
+  --accent: oklch(0.95  0.005 240);
+  --accent-foreground: oklch(0.22  0.012 240);
+  --destructive: oklch(0.55  0.18  25);
+  --destructive-foreground: oklch(0.985 0.003 240);
+  --border: oklch(0.90  0.006 240);
+  --input: oklch(0.90  0.006 240);
+  --ring: oklch(0.65  0.04  240);
   --radius: 0rem;
 
-  /* FF brand */
-  --ff-orange: #ff5b19;
-  --ff-orange-dark: #e63535;
+  /* ── Serena brand · platinum-blue accent ────────────────────────────────
+     `--ff-orange` is kept as a backwards-compat alias for the old code path
+     (`bg-ff-orange`, `text-ff-orange`, Button variant="ff", login spectrum).
+     The brand-true name is `--serena-accent`. */
+  --serena-accent:      oklch(0.65 0.04 240);
+  --serena-accent-soft: oklch(0.78 0.03 240);
+  --ff-orange:      var(--serena-accent);
+  --ff-orange-dark: var(--serena-accent-soft);
 
-  /* shadcn sidebar tokens */
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  /* sidebar tokens — slightly cooler than the main background to read as a
+     distinct rail without contrast noise */
+  --sidebar: oklch(0.97  0.005 240);
+  --sidebar-foreground: oklch(0.18  0.012 240);
+  --sidebar-primary: oklch(0.22  0.012 240);
+  --sidebar-primary-foreground: oklch(0.985 0.003 240);
+  --sidebar-accent: oklch(0.94  0.006 240);
+  --sidebar-accent-foreground: oklch(0.22  0.012 240);
+  --sidebar-border: oklch(0.90  0.006 240);
+  --sidebar-ring: oklch(0.65 0.04 240);
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.396 0.141 25.723);
-  --destructive-foreground: oklch(0.637 0.237 25.331);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
+  --background: oklch(0.14  0.005 240);
+  --foreground: oklch(0.97  0.005 240);
+  --card: oklch(0.19  0.008 240);
+  --card-foreground: oklch(0.97  0.005 240);
+  --popover: oklch(0.19  0.008 240);
+  --popover-foreground: oklch(0.97  0.005 240);
+  --primary: oklch(0.92  0.008 240);
+  --primary-foreground: oklch(0.18  0.012 240);
+  --secondary: oklch(0.24  0.008 240);
+  --secondary-foreground: oklch(0.97  0.005 240);
+  --muted: oklch(0.24  0.008 240);
+  --muted-foreground: oklch(0.68  0.012 240);
+  --accent: oklch(0.24  0.008 240);
+  --accent-foreground: oklch(0.97  0.005 240);
+  --destructive: oklch(0.42  0.14  25);
+  --destructive-foreground: oklch(0.78  0.16  25);
+  --border: oklch(1 0 0 / 8%);
+  --input: oklch(1 0 0 / 12%);
+  --ring: oklch(0.55  0.04 240);
 
-  /* shadcn sidebar tokens — dark */
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.985 0 0);
-  --sidebar-primary-foreground: oklch(0.205 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  --serena-accent:      oklch(0.78 0.04 240);
+  --serena-accent-soft: oklch(0.62 0.03 240);
+  --ff-orange:      var(--serena-accent);
+  --ff-orange-dark: var(--serena-accent-soft);
+
+  --sidebar: oklch(0.16  0.005 240);
+  --sidebar-foreground: oklch(0.97  0.005 240);
+  --sidebar-primary: oklch(0.97  0.005 240);
+  --sidebar-primary-foreground: oklch(0.18  0.012 240);
+  --sidebar-accent: oklch(0.22  0.008 240);
+  --sidebar-accent-foreground: oklch(0.97  0.005 240);
+  --sidebar-border: oklch(1 0 0 / 8%);
+  --sidebar-ring: oklch(0.55  0.04 240);
 }
 
 @theme inline {
@@ -96,6 +111,7 @@
   --color-input: var(--input);
   --color-ring: var(--ring);
   --color-ff-orange: var(--ff-orange);
+  --color-serena-accent: var(--serena-accent);
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar-primary: var(--sidebar-primary);
@@ -123,27 +139,33 @@
     background: var(--background);
     color: var(--foreground);
     font-feature-settings: 'rlig' 1, 'calt' 1, 'ss01' 1;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
   }
-  /* Tighter display tracking — matches the FF brand voice on headings. */
+  /* Editorial display tracking — pulls headings tight against the body
+     text for a magazine-like rhythm. */
   h1, h2, h3, h4 {
-    letter-spacing: -0.02em;
+    letter-spacing: -0.025em;
   }
-  /* Numbers / call IDs / coupon codes — Space Mono. */
+  /* Numbers / call IDs / coupon codes — Space Mono with tabular figures so
+     KPI columns and durations align across rows. */
   code, kbd, samp, pre, .tabular-nums {
     font-family: var(--font-mono);
     font-feature-settings: 'tnum' 1;
   }
+  /* Subtle text selection — platinum tint instead of OS-default blue. */
+  ::selection {
+    background: color-mix(in oklab, var(--serena-accent) 28%, transparent);
+    color: var(--foreground);
+  }
 }
 
 /* ─── Login screen · "studio monitoring" backdrop ────────────────────────
-   A quiet voice-agent atmosphere: a warm spotlight behind the card, a
-   barely-there audio spectrum drifting across the horizon, film grain, and
-   a vignette. Everything is intentionally underplayed — premium by way of
-   restraint, not effect. */
+   Cool architectural atmosphere: a quiet platinum spotlight behind the card,
+   a barely-there spectrum on the horizon, hairline grid, vignette. All under-
+   played — premium by way of restraint. */
 
 .login-shell {
-  /* A faint hairline grid layered under everything. Reads as "control
-     surface" rather than decoration. */
   background-image:
     linear-gradient(to right, color-mix(in oklab, var(--foreground) 5%, transparent) 1px, transparent 1px),
     linear-gradient(to bottom, color-mix(in oklab, var(--foreground) 5%, transparent) 1px, transparent 1px);
@@ -155,7 +177,7 @@
   background:
     radial-gradient(
       ellipse 60% 50% at 50% 42%,
-      color-mix(in oklab, var(--ff-orange) 14%, transparent) 0%,
+      color-mix(in oklab, var(--serena-accent) 16%, transparent) 0%,
       transparent 70%
     ),
     radial-gradient(
@@ -194,12 +216,12 @@
   background: linear-gradient(
     to right,
     transparent 0%,
-    color-mix(in oklab, var(--ff-orange) 70%, transparent) 25%,
-    var(--ff-orange) 50%,
-    color-mix(in oklab, var(--ff-orange) 70%, transparent) 75%,
+    color-mix(in oklab, var(--serena-accent) 60%, transparent) 25%,
+    var(--serena-accent) 50%,
+    color-mix(in oklab, var(--serena-accent) 60%, transparent) 75%,
     transparent 100%
   );
-  box-shadow: 0 0 14px 0 color-mix(in oklab, var(--ff-orange) 45%, transparent);
+  box-shadow: 0 0 14px 0 color-mix(in oklab, var(--serena-accent) 35%, transparent);
 }
 
 .login-pulse {
@@ -215,12 +237,12 @@
   background:
     radial-gradient(
       ellipse 60% 50% at 50% 42%,
-      color-mix(in oklab, var(--ff-orange) 22%, transparent) 0%,
+      color-mix(in oklab, var(--serena-accent) 22%, transparent) 0%,
       transparent 70%
     ),
     radial-gradient(
       ellipse 90% 70% at 50% 50%,
-      color-mix(in oklab, #5a3a20 18%, transparent) 0%,
+      color-mix(in oklab, #1f2937 22%, transparent) 0%,
       transparent 75%
     );
 }
@@ -258,8 +280,6 @@
 
 /* ─── Call scrubber · "tape reel" plot area ───────────────────────────── */
 .scrubber-plot {
-  /* A faint vertical grid behind the waveform — reads as a control surface
-     without competing with the bars themselves. */
   background-image: linear-gradient(
     to right,
     color-mix(in oklab, var(--foreground) 4%, transparent) 1px,
@@ -277,13 +297,13 @@
 }
 
 /* Jump highlight — when the scrubber dispatches "go to turn N", the matching
-   row briefly flashes so the user can find it after the scroll lands. */
+   row briefly flashes platinum so the eye lands on it after the scroll. */
 .turn-row-pulse {
   animation: turn-pulse 1.5s ease-out;
 }
 @keyframes turn-pulse {
-  0%   { background-color: color-mix(in oklab, var(--ff-orange) 22%, transparent); }
-  60%  { background-color: color-mix(in oklab, var(--ff-orange) 12%, transparent); }
+  0%   { background-color: color-mix(in oklab, var(--serena-accent) 24%, transparent); }
+  60%  { background-color: color-mix(in oklab, var(--serena-accent) 12%, transparent); }
   100% { background-color: transparent; }
 }
 @media (prefers-reduced-motion: reduce) {

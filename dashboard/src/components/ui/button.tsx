@@ -19,7 +19,10 @@ const buttonVariants = cva(
         ghost:
           "hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50",
         link: "text-primary underline-offset-4 hover:underline",
-        ff: "bg-ff-orange text-white hover:opacity-90",
+        // Monochrome luxury CTA — graphite-on-bone in light, bone-on-graphite
+        // in dark. Reads like the primary actions on Aman / Loro Piana / Apple:
+        // pure contrast, no chroma, the most premium thing in the system.
+        ff: "bg-foreground text-background hover:bg-foreground/85 active:bg-foreground/75",
       },
       size: {
         default: "h-9 px-4 py-2 has-[>svg]:px-3",

@@ -16,8 +16,8 @@ const spaceMono = Space_Mono({
 });
 
 export const metadata: Metadata = {
-  title: 'Funded Friday Ops',
-  description: 'Voice agent operations dashboard for Funded Friday.',
+  title: 'Serena',
+  description: 'Voice agent operations dashboard.',
 };
 
 export default function RootLayout({
