@@ -76,6 +76,27 @@ class PastOrderSummary(BaseModel):
     days_ago: int
 
 
+class Sentiment(StrEnum):
+    POSITIVE = "POSITIVE"
+    NEGATIVE = "NEGATIVE"
+    NEUTRAL = "NEUTRAL"
+
+
+class RecentUserSignals(BaseModel):
+    """Small snapshot of recent USER-turn behavior the prompt can adapt to.
+
+    Sourced async (via the classify-analytics worker) on the gateway side and
+    forwarded per turn. Missing values just degrade the signal — never block.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    sentiments: list[Sentiment] = []  # oldest-first across the last 3 USER turns
+    filler_density: float | None = None  # 0.0 – 1.0
+    length_trend: float | None = None    # tokens-per-turn slope across recent turns
+    repeated_objection: str | None = None  # objection_type repeated on consecutive turns
+
+
 class CustomerContext(BaseModel):
     """Everything the agent should know about who it's talking to before
     saying anything. Sourced from the Customer + Purchase + Call tables.
@@ -137,11 +158,14 @@ class ConverseRequest(BaseModel):
     premium_product_context: ProductContext | None = None
     cart_context: CartContext | None = None
     customer_context: CustomerContext | None = None
+    recent_user_signals: RecentUserSignals | None = None
     discounts_already_offered: list[int] = []  # e.g. [] | [5] | [5, 10]
     # Agent identity for the proactive opener. The LLM uses these to introduce
-    # itself naturally on the first turn ("Hi Sarah, this is Alex from ShopEase...").
-    agent_name: str = "Alex"
-    business_name: str = "ShopEase"
+    # itself naturally on the first turn ("Hi Sarah, this is Serena from ShopEase...").
+    # The agent is a woman; see _objective() in converse_prompt_builder for the
+    # gender-grammar contract (matters in Hindi/Hinglish).
+    agent_name: str = "Serena"
+    business_name: str = "Muscleblaze"
     # The discount the agent can offer up front on the opener as a
     # call-completion incentive. Defaults to 5%; absolute cap remains 10%.
     opening_offer_percent: int = 5

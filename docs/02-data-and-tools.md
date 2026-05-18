@@ -10,7 +10,7 @@ This doc covers the Postgres schema, the 5 observation tools the LLM uses to rea
 
 Two Prisma generators run off the same [prisma/schema.prisma](../prisma/schema.prisma): `prisma-client-js` for the Node gateway, `prisma-client-py` (asyncio) for the FastAPI brain.
 
-Eight tables, three of them powering observation tools, one of them powering promotional behavior, four of them tracking customers and calls.
+**Ten Prisma models.** Nine are live — `customers`, `carts`, `cart_items`, `purchases`, `products`, `product_reviews`, `offers`, `calls`, `call_turns` — three powering observation tools, one (`offers`) powering promotional behavior, the rest tracking customers and calls. The tenth, `scoring_config`, is a vestigial leftover from the rules-engine era (along with the `CallTurn.stage` / `scoreBefore` / `scoreAfter` columns) — written with placeholder values and unused by the converse pipeline. Safe to drop in a future migration.
 
 ```
 customers ──┬─► carts ── cart_items ──┐
@@ -21,7 +21,7 @@ customers ──┬─► carts ── cart_items ──┐
 
 ### Key Prisma definitions
 
-[prisma/schema.prisma:50-70](../prisma/schema.prisma#L50-L70)
+[prisma/schema.prisma:55-75](../prisma/schema.prisma#L55-L75)
 
 ```prisma
 model Customer {
@@ -49,7 +49,7 @@ model Customer {
 
 The `segment` enum is what drives the agent's tone — `FIRST_TIME` gets the trust-building variant, `VIP` gets a warmer recap, `LAPSED` gets the *"been a while"* opener. See [03-prompt-and-conversion.md](03-prompt-and-conversion.md) for how those flow into the prompt.
 
-[prisma/schema.prisma:182-217](../prisma/schema.prisma#L182-L217)
+[prisma/schema.prisma:187-215](../prisma/schema.prisma#L187-L215)
 
 ```prisma
 model Product {
@@ -88,7 +88,7 @@ Notable columns:
 
 ### The `Offer` model
 
-[prisma/schema.prisma:221-249](../prisma/schema.prisma#L221-L249)
+[prisma/schema.prisma:217-241](../prisma/schema.prisma#L217-L241)
 
 ```prisma
 enum OfferType {
@@ -127,7 +127,7 @@ The two named relations are what let an offer be both *attached* to a primary pr
 
 ### `Call` and `CallTurn` — the audit trail
 
-[prisma/schema.prisma:135-180](../prisma/schema.prisma#L135-L180)
+[prisma/schema.prisma:140-185](../prisma/schema.prisma#L140-L185)
 
 ```prisma
 model Call {
@@ -172,6 +172,8 @@ model CallTurn {
 **Outcome detection rule** — under the converse pipeline, a call is `CONVERTED` iff some `CallTurn` row has `toolCalled = 'send_whatsapp_checkout_link'`. Everything else is `DROPPED`. See [01-runtime-flow.md §8](01-runtime-flow.md) for the detection code.
 
 **Async tagging** — the three columns `objectionType`, `objectionSubtype`, `sentiment` are populated by the `classify-analytics-queue` worker, NOT by the response-path code. This keeps the hot path free of the classifier roundtrip.
+
+**Recent-turn signals** — those async `sentiment` + `objectionType` tags are read back on later turns by `db.service.ts:getRecentTurnSignals()` to build the sentiment-streak / repeated-objection signals the brain adapts to. See [01-runtime-flow.md §4.2](01-runtime-flow.md) and [ARCHITECTURE_STUDY.md §4.9](../ARCHITECTURE_STUDY.md).
 
 ---
 
