@@ -4,7 +4,15 @@ import { z } from 'zod';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { config } from '../config/env.js';
 import { redis } from '../lib/redis.js';
+import { prisma } from '../lib/prisma.js';
 import { AppError, ErrorCodes } from '../utils/errors.js';
+
+function checkAdminSecret(headers: FastifyRequest['headers']): boolean {
+  const adminSecret = headers['x-admin-secret'] as string | undefined;
+  const expBuf = Buffer.from(config.ADMIN_SECRET);
+  const actBuf = Buffer.from(adminSecret ?? '');
+  return actBuf.length === expBuf.length && crypto.timingSafeEqual(actBuf, expBuf);
+}
 
 const triggerSchema = z.object({
   phone_number: z.string().regex(/^\+[1-9]\d{1,14}$/, 'Must be E.164 format'),
@@ -15,11 +23,7 @@ const triggerSchema = z.object({
 
 export default async function callsRoutes(app: FastifyInstance) {
   app.post('/calls/trigger', async (request: FastifyRequest, reply: FastifyReply) => {
-    const adminSecret = request.headers['x-admin-secret'] as string | undefined;
-    const expBuf = Buffer.from(config.ADMIN_SECRET);
-    const actBuf = Buffer.from(adminSecret ?? '');
-    const valid = actBuf.length === expBuf.length && crypto.timingSafeEqual(actBuf, expBuf);
-    if (!valid) {
+    if (!checkAdminSecret(request.headers)) {
       return reply.status(403).send({ error: { code: 'FORBIDDEN', message: 'Invalid admin secret' } });
     }
 
@@ -75,5 +79,75 @@ export default async function callsRoutes(app: FastifyInstance) {
     await redis.expire(limitKey, 86400);
 
     return reply.status(202).send({ call_id: vapiCallId });
+  });
+
+  app.get('/calls/web-config', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!checkAdminSecret(request.headers)) {
+      return reply.status(403).send({ error: { code: 'FORBIDDEN', message: 'Invalid admin secret' } });
+    }
+    if (!config.VAPI_PUBLIC_KEY) {
+      return reply.status(503).send({
+        error: { code: 'NOT_CONFIGURED', message: 'VAPI_PUBLIC_KEY env var is not set' },
+      });
+    }
+    return reply.send({
+      public_key: config.VAPI_PUBLIC_KEY,
+      assistant_id: config.VAPI_ASSISTANT_ID,
+    });
+  });
+
+  app.get('/calls/:id/recording', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!checkAdminSecret(request.headers)) {
+      return reply.status(403).send({ error: { code: 'FORBIDDEN', message: 'Invalid admin secret' } });
+    }
+    const { id } = request.params as { id: string };
+
+    const row = await prisma.call.findUnique({
+      where: { callId: id },
+      select: { recordingUrl: true, stereoRecordingUrl: true },
+    });
+    if (row?.recordingUrl || row?.stereoRecordingUrl) {
+      return reply.send({
+        recording_url: row.recordingUrl,
+        stereo_recording_url: row.stereoRecordingUrl,
+      });
+    }
+
+    // Fall back to Vapi if the webhook hasn't persisted the URL yet.
+    try {
+      const vapiCall = await got
+        .get(`https://api.vapi.ai/call/${encodeURIComponent(id)}`, {
+          headers: { Authorization: `Bearer ${config.VAPI_API_KEY}` },
+        })
+        .json<{ recordingUrl?: string | null; stereoRecordingUrl?: string | null }>();
+      const recordingUrl = vapiCall.recordingUrl ?? null;
+      const stereoRecordingUrl = vapiCall.stereoRecordingUrl ?? null;
+      if (recordingUrl || stereoRecordingUrl) {
+        await prisma.call
+          .update({
+            where: { callId: id },
+            data: { recordingUrl, stereoRecordingUrl },
+          })
+          .catch(() => undefined);
+      }
+      return reply.send({
+        recording_url: recordingUrl,
+        stereo_recording_url: stereoRecordingUrl,
+      });
+    } catch (err) {
+      let status: number | undefined;
+      if (typeof err === 'object' && err !== null && 'response' in err) {
+        status = (err as { response?: { statusCode?: number } }).response?.statusCode;
+      }
+      if (status === 404) {
+        return reply
+          .status(404)
+          .send({ error: { code: 'NOT_FOUND', message: 'Call not found in Vapi' } });
+      }
+      request.log.error({ err, callId: id }, 'Vapi recording fetch failed');
+      return reply
+        .status(502)
+        .send({ error: { code: 'VAPI_ERROR', message: 'Failed to fetch recording from Vapi' } });
+    }
   });
 }

@@ -311,8 +311,24 @@ export default async function webhookRoutes(app: FastifyInstance) {
         });
         const outcome: 'CONVERTED' | 'DROPPED' = checkoutTurn ? 'CONVERTED' : 'DROPPED';
 
-        const report = event.message as { durationSeconds?: number };
+        const report = event.message as {
+          durationSeconds?: number;
+          recordingUrl?: string | null;
+          stereoRecordingUrl?: string | null;
+        };
         await endSession(callId);
+
+        if (report.recordingUrl || report.stereoRecordingUrl) {
+          prisma.call
+            .update({
+              where: { callId },
+              data: {
+                recordingUrl: report.recordingUrl ?? null,
+                stereoRecordingUrl: report.stereoRecordingUrl ?? null,
+              },
+            })
+            .catch((err) => log.error({ err }, 'Failed to persist recording URLs'));
+        }
 
         const discountGiven =
           session.discountsOffered.length > 0 ? Math.max(...session.discountsOffered) : 0;

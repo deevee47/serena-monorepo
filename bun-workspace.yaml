@@ -1,2 +1,3 @@
 workspaces:
   - node-gateway
+  - dashboard
