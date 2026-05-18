@@ -33,4 +33,16 @@ You don't need to know:
 
 - `[file.ts:N](path/file.ts#LN)` — clickable link to a specific line. Open in your IDE / GitHub.
 - Code blocks show **excerpts**, not always full files. Open the file in your IDE for full context.
-- Snippets are accurate to the current `main` branch at time of writing.
+- Snippets track the current implementation, including the `feat/human-feel-pacing`
+  work (live customer/cart context, sentiment-adaptive prompts, thinking fillers,
+  voice tuning). Line numbers drift as code changes — treat them as a starting
+  point, not gospel.
+
+## History
+
+- [history/BUILD_GUIDE.md](history/BUILD_GUIDE.md) — the original pre-pivot
+  "engineering master spec." **Superseded.** It describes a deterministic
+  rules-engine architecture ("the LLM is a voice synthesis layer, not a brain")
+  that was deleted and replaced by the single function-calling LLM. Kept for
+  project history only — see [../ARCHITECTURE_STUDY.md](../ARCHITECTURE_STUDY.md)
+  and [../CONVERSION_ENGINE.md](../CONVERSION_ENGINE.md) for current truth.

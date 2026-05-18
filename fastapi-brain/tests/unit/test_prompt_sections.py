@@ -58,7 +58,9 @@ def test_format_cart_includes_total_and_quantity():
     assert "2× Widget" in out
     assert "$49.00" in out
     assert "$98.00" in out
-    assert "abandoned ~10 min ago" in out
+    # 10 minutes ago lands in the "just now" bucket (<30 min). The freshness
+    # banner phrase comes from _format_abandoned_when.
+    assert "abandoned just now" in out
 
 
 def test_format_cart_omits_quantity_when_one():

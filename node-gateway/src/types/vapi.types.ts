@@ -102,3 +102,39 @@ export interface VapiAssistantConfig {
     };
   };
 }
+
+/**
+ * Per-call overrides Vapi accepts on POST /call/phone alongside `assistantId`.
+ * Only the fields we actually set are typed — Vapi accepts many more.
+ *
+ * https://docs.vapi.ai/api-reference/calls/create — see the assistantOverrides
+ * shape under `Assistant` (most fields mirror the assistant's persistent config).
+ */
+export interface VapiAssistantOverrides {
+  /** Custom LLM endpoint Vapi calls instead of OpenAI. */
+  model?: {
+    provider: 'custom-llm';
+    url: string;
+    model?: string;
+    /** Vapi attaches this header to every Custom-LLM POST. */
+    authorization?: string;
+  };
+  voice?: {
+    provider: string;
+    voiceId: string;
+  };
+  /** Hang up if the customer has been silent for this many seconds. Sales
+   *  pace prefers 12s; Vapi default is 30s. */
+  silenceTimeoutSeconds?: number;
+  /** Time the assistant waits before responding once the customer stops
+   *  speaking. Lower = snappier; too low = it cuts the customer off. */
+  responseDelaySeconds?: number;
+  /** How many words of customer speech triggers a barge-in. 2 keeps it
+   *  feeling like a real conversation; default ~3-4 is too tolerant. */
+  numWordsToInterruptAssistant?: number;
+  /** "mhm", "yeah", "got it" — backchanneled by Vapi while the customer
+   *  is mid-sentence. Makes the agent feel attentive. */
+  backchannelingEnabled?: boolean;
+  /** Phrases that, when the customer says them, end the call cleanly. */
+  endCallPhrases?: string[];
+}
