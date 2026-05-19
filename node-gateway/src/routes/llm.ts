@@ -14,16 +14,13 @@
  * send out-of-band.
  */
 
-import crypto from 'crypto';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { config } from '../config/env.js';
-import { redis } from '../lib/redis.js';
 import { createCallLogger } from '../utils/logger.js';
+import { redis } from '../lib/redis.js';
 import {
-  createSession,
-  getSession,
+  ensureSessionForCall,
   updateSession,
-  appendTurn,
   getRecentHistory,
 } from '../services/session.service.js';
 import {
@@ -37,19 +34,14 @@ import {
   getProductById,
   toProductContext,
 } from '../services/product.service.js';
-import {
-  createCallRecord,
-  getRecentTurnSignals,
-  insertCallTurn,
-  loadCallContext,
-  type LoadedCallContext,
-} from '../services/db.service.js';
-import { classifyAnalyticsQueue } from '../queues/index.js';
+import { getCachedCallContext, getRecentTurnSignals } from '../services/db.service.js';
+import { persistTurnPair } from '../services/turn-persist.service.js';
 import {
   detectFillerLanguage,
   isDisfluencyOpener,
   thinkingFillerFor,
 } from '../services/thinking-filler.js';
+import { detectLlmProvider, getVoiceProvider } from '../services/voice-provider/index.js';
 
 interface VapiCustomLlmMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
@@ -70,68 +62,182 @@ interface VapiCustomLlmRequest {
 
 const HISTORY_TURNS_TO_INCLUDE = 4;
 
-export default async function vapiLlmRoutes(app: FastifyInstance) {
-  app.post(
-    '/vapi-llm/chat/completions',
-    async (request: FastifyRequest, reply: FastifyReply) => {
-      // Auth — DEV MODE: fully permissive. Vapi reaches us via an obscure
-      // ngrok URL. We log whether the Authorization header matches
-      // VAPI_WEBHOOK_SECRET but never reject on mismatch.
-      // TODO: tighten before prod — accept-only-if-match with timing-safe
-      // compare, identical to the /webhook handler.
-      const authHeader = request.headers['authorization'] as string | undefined;
-      if (authHeader !== undefined) {
-        const expected = `Bearer ${config.VAPI_WEBHOOK_SECRET}`;
-        const expBuf = Buffer.from(expected);
-        const authBuf = Buffer.from(authHeader);
-        const matches =
-          authBuf.length === expBuf.length && crypto.timingSafeEqual(authBuf, expBuf);
-        if (!matches) {
-          request.log.warn(
-            {
-              auth_header_starts_with_bearer: authHeader.startsWith('Bearer '),
-              auth_header_length: authHeader.length,
-              expected_length: expected.length,
-            },
-            'vapi-llm auth mismatch — proceeding anyway (DEV)',
-          );
-        }
-      }
+/** Matches WEB_BRIDGE_TTL_SECONDS in routes/webhook.ts. Kept inline rather
+ *  than imported because cross-route imports invite circular-dep accidents. */
+const WEB_BRIDGE_TTL_SECONDS = 300;
 
-      const body = request.body as VapiCustomLlmRequest;
-      const callId = body.call?.id;
-      if (!callId) {
-        return reply.status(400).send({
-          error: { code: 'MISSING_CALL_ID', message: 'call.id is required' },
-        });
-      }
-      const log = createCallLogger(callId);
+/**
+ * Per-call Redis pub/sub channel for live deltas. The dashboard's SSE route
+ * subscribes to this and forwards each message as an SSE event so LiveTail
+ * can stream agent text chunk-by-chunk instead of waiting for the next
+ * 1.5s Postgres poll.
+ */
+function liveChannel(callId: string): string {
+  return `live:${callId}`;
+}
 
-      // Find or lazily create the session. For outbound calls Vapi never
-      // fires `assistant-request`, so this is the first time we see callId.
-      let session = await getSession(callId);
-      let triggerProvidedProduct = false;
-      if (!session) {
-        const pendingRaw = await redis.get(`pending_call:${callId}`);
-        let productId = 'prod-001';
-        if (pendingRaw) {
-          try {
-            productId = (JSON.parse(pendingRaw) as { productId: string }).productId;
-            triggerProvidedProduct = true;
-          } catch {
-            /* ignore */
-          }
-        } else if (typeof body.call?.metadata?.['product_id'] === 'string') {
-          productId = body.call.metadata['product_id'] as string;
-          triggerProvidedProduct = true;
-        }
-        const phoneNumber = body.call?.customer?.number ?? 'unknown';
-        session = await createSession({ callId, phoneNumber, productId });
-        createCallRecord(session).catch((err) =>
-          log.error({ err }, 'createCallRecord failed'),
-        );
-        log.info({ productId, phoneNumber }, 'Vapi LLM: lazily created session');
-      }
+function publishLive(callId: string, event: Record<string, unknown>): void {
+  // Fire-and-forget. A failed publish should never block the LLM response —
+  // the dashboard's Postgres poll will still pick up the persisted turn,
+  // just with the usual ~1.5s delay.
+  const payload = JSON.stringify({ ...event, ts: new Date().toISOString() });
+  redis.publish(liveChannel(callId), payload).catch(() => undefined);
+}
+
+/**
+ * Pull a bridge UUID out of provider-supplied metadata. Telnyx forwards custom
+ * headers (`X-Bridge-UUID`) as dynamic variables, and the exact field name
+ * varies across portal toggles (`X-Bridge-UUID`, `x-bridge-uuid`,
+ * `bridge_uuid`, …). Try every variant — first non-empty string wins.
+ */
+function extractBridgeUuid(metadata: Record<string, unknown>): string | null {
+  const candidates = [
+    'bridge_uuid',
+    'bridgeUuid',
+    'X-Bridge-UUID',
+    'x-bridge-uuid',
+    'X_Bridge_UUID',
+  ];
+  for (const key of candidates) {
+    const v = metadata[key];
+    if (typeof v === 'string' && v.length > 0) return v;
+  }
+  return null;
+}
+
+async function llmCompletionsHandler(request: FastifyRequest, reply: FastifyReply) {
+  // Auto-detect the provider per-request. Both providers can hit this same
+  // /llm/chat/completions URL — Telnyx supplies `x-telnyx-call-control-id`
+  // in headers (or a `telnyx_call` block in body), Vapi puts the call info
+  // inside `body.call.*`.
+  const providerName = detectLlmProvider(request.headers, request.body);
+  const provider = getVoiceProvider(providerName);
+
+  // Dev-only: dump headers + body so we can see Telnyx's exact envelope and
+  // tighten parseLlmEnvelope when needed.
+  if (config.TELNYX_INSECURE_DEV === '1' && provider.name === 'telnyx') {
+    request.log.warn(
+      {
+        headers: request.headers,
+        body_preview: JSON.stringify(request.body).slice(0, 2000),
+      },
+      'TELNYX_INSECURE_DEV: incoming LLM request',
+    );
+  }
+
+  // Auth — DEV-friendly: log mismatches but proceed. Tighten when the
+  // public ngrok/staging URL is replaced by a stable prod URL.
+  const auth = provider.verifyLlmAuth(request.headers);
+  if (!auth.ok) {
+    request.log.warn({ reason: auth.reason }, 'llm auth mismatch — proceeding anyway (DEV)');
+  }
+
+  const env = provider.parseLlmEnvelope(request.headers, request.body);
+  const callId = env.callId;
+  if (!callId) {
+    // Telnyx's portal "Validate LLM connection" button POSTs a probe with
+    // no call envelope. Treat any callId-less request as a connectivity
+    // check and stream back a minimal OpenAI-compatible response so the
+    // validator passes. Real calls always carry a call_id; if this fires
+    // during a live call, parseLlmEnvelope needs an extra candidate field —
+    // turn on TELNYX_INSECURE_DEV to dump the full request shape.
+    request.log.info(
+      { provider: provider.name, header_keys: Object.keys(request.headers) },
+      'LLM probe (no call id) — returning stub validation response',
+    );
+    reply.raw.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    const stubId = `chatcmpl-probe-${Date.now()}`;
+    const stubCreated = Math.floor(Date.now() / 1000);
+    const reqBody = request.body as
+      | { model?: string; stream_options?: { include_usage?: boolean } }
+      | null;
+    const stubModel = reqBody?.model ?? 'serena-converse';
+    const includeUsage = reqBody?.stream_options?.include_usage === true;
+
+    const writeChunk = (
+      delta: Record<string, unknown>,
+      finishReason: string | null = null,
+    ) => {
+      reply.raw.write(
+        `data: ${JSON.stringify({
+          id: stubId,
+          object: 'chat.completion.chunk',
+          created: stubCreated,
+          model: stubModel,
+          choices: [{ index: 0, delta, finish_reason: finishReason }],
+          ...(includeUsage ? { usage: null } : {}),
+        })}\n\n`,
+      );
+    };
+
+    writeChunk({ role: 'assistant' });
+    writeChunk({ content: 'ok' });
+    writeChunk({}, 'stop');
+
+    // Per OpenAI's stream_options.include_usage contract, send a final
+    // usage-only chunk (empty choices) right before [DONE]. Telnyx's
+    // validator requests this — without it, the integration may pass the
+    // "connection test" but get rejected by stricter call-time checks.
+    if (includeUsage) {
+      reply.raw.write(
+        `data: ${JSON.stringify({
+          id: stubId,
+          object: 'chat.completion.chunk',
+          created: stubCreated,
+          model: stubModel,
+          choices: [],
+          usage: {
+            prompt_tokens: 0,
+            completion_tokens: 1,
+            total_tokens: 1,
+          },
+        })}\n\n`,
+      );
+    }
+
+    reply.raw.write('data: [DONE]\n\n');
+    reply.raw.end();
+    return;
+  }
+  const log = createCallLogger(callId);
+
+  const body = request.body as VapiCustomLlmRequest;
+
+  // Find or lazily create the session. For outbound calls the provider may
+  // not fire an init webhook before the first LLM turn, so this is often
+  // the first time we see callId.
+  const phoneNumber = env.phoneNumber ?? 'unknown';
+  const metadataProductId =
+    typeof env.metadata['product_id'] === 'string'
+      ? (env.metadata['product_id'] as string)
+      : null;
+  const ensured = await ensureSessionForCall({ callId, phoneNumber, metadataProductId });
+  let session = ensured.session;
+  const triggerProvidedProduct = ensured.productFromTrigger;
+  if (ensured.isNew) {
+    log.info(
+      { productId: session.currentProductId, phoneNumber, provider: provider.name },
+      'LLM: lazily created session',
+    );
+  }
+
+  // Bridge map for the dashboard's LiveTail. TeXML-routed WebRTC calls don't
+  // surface `client_state` in our webhooks, so we write the bridge entry from
+  // here on every LLM turn (idempotent via SETEX). The bridgeUuid was passed
+  // as the `X-Bridge-UUID` custom header in the browser's startConversation.
+  const bridgeUuid = extractBridgeUuid(env.metadata);
+  if (bridgeUuid) {
+    await redis
+      .setex(`web_call_bridge:${bridgeUuid}`, WEB_BRIDGE_TTL_SECONDS, callId)
+      .catch((err) =>
+        log.warn({ err, bridgeUuid }, 'web_call_bridge write failed (non-fatal)'),
+      );
+  }
 
       const lastUserMessage = [...body.messages]
         .reverse()
@@ -142,23 +248,7 @@ export default async function vapiLlmRoutes(app: FastifyInstance) {
       // Cached per-call on Redis so we hit Postgres once per call, not once
       // per turn. The cart loaded here is the actual abandoned cart for this
       // phone number, not a synthetic single-product placeholder.
-      const ctxKey = `call_ctx:${callId}`;
-      let loaded: LoadedCallContext;
-      const cached = await redis.get(ctxKey).catch(() => null);
-      if (cached) {
-        try {
-          loaded = JSON.parse(cached) as LoadedCallContext;
-        } catch {
-          loaded = await loadCallContext(session.phoneNumber);
-          await redis.setex(ctxKey, 1800, JSON.stringify(loaded));
-        }
-      } else {
-        loaded = await loadCallContext(session.phoneNumber).catch((err) => {
-          log.warn({ err }, 'loadCallContext failed — falling back to empty context');
-          return { customer: null, cart: null, primaryProductId: null } as LoadedCallContext;
-        });
-        await redis.setex(ctxKey, 1800, JSON.stringify(loaded)).catch(() => {});
-      }
+      const loaded = await getCachedCallContext(callId, session.phoneNumber);
 
       // If the call was triggered without an explicit product_id, prefer
       // the customer's actually-abandoned product over the prod-001 default.
@@ -291,6 +381,14 @@ export default async function vapiLlmRoutes(app: FastifyInstance) {
 
       let fullText = '';
       let dispatch: ReturnType<typeof dispatchToolCall> | null = null;
+      // Captured from the brain's `observation` stream events. Persisted on
+      // the AGENT turn so LiveTail surfaces an observation chip for each
+      // tool invocation (list_products, get_offer, etc.).
+      const observations: Array<{
+        name: string;
+        args: Record<string, unknown>;
+        result: Record<string, unknown>;
+      }> = [];
 
       // Filler language: prefer the customer's actual reply, fall back to timezone.
       const fillerLang = detectFillerLanguage({
@@ -316,6 +414,7 @@ export default async function vapiLlmRoutes(app: FastifyInstance) {
             onTextDelta: (delta) => {
               fullText += delta;
               sendChunk({ content: delta });
+              publishLive(callId, { type: 'text_delta', delta });
             },
             onThinking: (toolName) => {
               // Suppress if the LLM already opened with its own disfluency cue —
@@ -324,7 +423,16 @@ export default async function vapiLlmRoutes(app: FastifyInstance) {
               const filler = thinkingFillerFor(toolName, fillerLang);
               fullText += filler;
               sendChunk({ content: filler });
+              publishLive(callId, { type: 'text_delta', delta: filler });
+              publishLive(callId, { type: 'status', status: 'thinking', tool: toolName });
               log.info({ tool: toolName, lang: fillerLang }, 'thinking filler sent');
+            },
+            onObservation: (obs) => {
+              // Note: NOT published over live: pub/sub. The dashboard's SSE
+              // route emits `observation` events when it polls the persisted
+              // `CallTurn.observationsCalled`, and double-publishing would
+              // duplicate the chip via LiveTail's pendingObservationsRef.
+              observations.push(obs);
             },
           },
         );
@@ -337,6 +445,9 @@ export default async function vapiLlmRoutes(app: FastifyInstance) {
               ? { id: product.id, name: product.name, price: product.price }
               : null,
           });
+          // Note: NOT published over live: pub/sub for the same reason as
+          // observations — the SSE-route poll re-emits `tool_call` from
+          // CallTurn.toolCalled and would double-fire the chip update.
           log.info(
             {
               tool: dispatch.toolName,
@@ -365,72 +476,58 @@ export default async function vapiLlmRoutes(app: FastifyInstance) {
       }
 
       // ── Persist turns and update session (best-effort, off the response path)
-      const sessionUpdates: Parameters<typeof updateSession>[1] = {};
-      if (dispatch?.toolName === 'send_whatsapp_checkout_link') {
-        const offered =
-          (dispatch.appliedArgs['discount_percent'] as number | undefined) ?? 0;
-        if (offered > 0 && !session.discountsOffered.includes(offered)) {
-          sessionUpdates.discountsOffered = [...session.discountsOffered, offered];
-        }
-      }
-      if (Object.keys(sessionUpdates).length > 0) {
-        await updateSession(callId, sessionUpdates);
-      }
-
-      const now = new Date();
-      await appendTurn(callId, { speaker: 'USER', utterance, timestamp: now });
-      await appendTurn(callId, {
-        speaker: 'AGENT',
-        utterance: fullText,
-        timestamp: new Date(),
-      });
-
-      const turnBase = { scoreBefore: 0, scoreAfter: 0, stage: session.stage };
-
-      insertCallTurn(callId, {
-        turnNumber: session.turnCount + 1,
-        speaker: 'USER',
+      await persistTurnPair({
+        callId,
+        session,
         utterance,
-        ...turnBase,
-      })
-        .then((userTurnId) =>
-          classifyAnalyticsQueue
-            .add('classify', {
-              callId,
-              callTurnId: userTurnId,
-              utterance,
-              stage: session.stage,
-              score: 50,
-            })
-            .catch((err) =>
-              log.warn({ err }, 'enqueue classify-analytics failed'),
-            ),
-        )
-        .catch((err) => log.error({ err }, 'DB turn insert failed (user)'));
+        agentText: fullText,
+        dispatch,
+        observations,
+      });
 
       const discountAmount =
         dispatch?.toolName === 'send_whatsapp_checkout_link'
           ? (dispatch.appliedArgs['discount_percent'] as number | undefined) ?? null
           : null;
 
-      insertCallTurn(callId, {
-        turnNumber: session.turnCount + 2,
-        speaker: 'AGENT',
-        utterance: fullText,
-        toolCalled: dispatch?.toolName ?? null,
-        toolArgs: dispatch?.appliedArgs ?? null,
-        discountOffered: discountAmount,
-        ...turnBase,
-      }).catch((err) => log.error({ err }, 'DB turn insert failed (agent)'));
-
-      log.info(
-        {
-          text_len: fullText.length,
-          tool: dispatch?.toolName ?? null,
-          discount: discountAmount ?? undefined,
-        },
-        'Vapi LLM turn processed',
-      );
+  log.info(
+    {
+      text_len: fullText.length,
+      tool: dispatch?.toolName ?? null,
+      discount: discountAmount ?? undefined,
     },
+    'LLM turn processed',
   );
+}
+
+/**
+ * OpenAI-compatible model listing. Telnyx's Custom LLM portal hits
+ * `<base>/models` to populate its model picker — if the request 404s the
+ * portal surfaces `Failed to fetch models from external LLM: 404` and forces
+ * manual entry. Our handler ignores the `model` field (the brain decides),
+ * so any single advertised id will do; pick one descriptive.
+ */
+async function llmModelsHandler(_req: FastifyRequest, reply: FastifyReply) {
+  const created = Math.floor(Date.now() / 1000);
+  return reply.send({
+    object: 'list',
+    data: [
+      {
+        id: 'serena-converse',
+        object: 'model',
+        created,
+        owned_by: 'serena',
+      },
+    ],
+  });
+}
+
+export default async function vapiLlmRoutes(app: FastifyInstance) {
+  // Mounted at both paths: the legacy /vapi-llm/* preserves the existing
+  // Vapi assistant config without touching the portal, and /llm/* is the
+  // provider-agnostic canonical name that Telnyx assistants point at.
+  app.post('/vapi-llm/chat/completions', llmCompletionsHandler);
+  app.post('/llm/chat/completions', llmCompletionsHandler);
+  app.get('/vapi-llm/models', llmModelsHandler);
+  app.get('/llm/models', llmModelsHandler);
 }
