@@ -260,6 +260,16 @@ export interface ConverseStreamCallbacks {
    *  gateway uses this to fill the dead-air gap with a thinking-aloud filler
    *  ("ek minute, dekh ke batati hoon —"). */
   onThinking?: (toolName: string) => void;
+  /** Fired when the brain finishes an observation tool (e.g. list_products,
+   *  get_offer). The brain already fed the result back into its own LLM, but
+   *  the gateway captures it so it can persist the tool invocation on the
+   *  AGENT turn — that's what surfaces the observation chip in the dashboard
+   *  LiveTail. */
+  onObservation?: (obs: {
+    name: string;
+    args: Record<string, unknown>;
+    result: Record<string, unknown>;
+  }) => void;
 }
 
 export async function converseStream(
@@ -317,11 +327,15 @@ export async function converseStream(
           cb.onThinking?.(event.tool);
         } else if (event.type === 'tool_call') {
           toolCall = { name: event.name, args: event.args };
+        } else if (event.type === 'observation') {
+          cb.onObservation?.({
+            name: event.name,
+            args: event.args,
+            result: event.result,
+          });
         } else if (event.type === 'done') {
           finishReason = event.finish_reason ?? null;
         }
-        // 'observation' events are info-only for the gateway (the brain
-        // already fed the result back into the LLM). We don't act on them.
       }
     }
 
