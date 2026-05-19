@@ -23,5 +23,6 @@ export async function GET(
   return NextResponse.json({
     recording_url: result.recordingUrl ?? null,
     stereo_recording_url: result.stereoRecordingUrl ?? null,
+    recording_started_at: result.recordingStartedAt ?? null,
   });
 }
