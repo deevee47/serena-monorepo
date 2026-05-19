@@ -165,6 +165,8 @@ model Call {
   productId       String?     @map("product_id")
   recordingUrl       String?    @map("recording_url")
   stereoRecordingUrl String?    @map("stereo_recording_url")
+  providerRecordingId String?   @map("provider_recording_id")
+  voiceProvider       String?   @map("voice_provider")
 
   customer Customer?    @relation(fields: [customerId], references: [id])
   turns    CallTurn[]
