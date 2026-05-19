@@ -309,3 +309,73 @@
 @media (prefers-reduced-motion: reduce) {
   .turn-row-pulse { animation: none; }
 }
+
+/* ─── Call scrubber · linear playback slider ────────────────────────────
+   Native <input type="range"> gets free keyboard / a11y support but its
+   default chrome doesn't match the reel. Restyle the track + thumb to
+   read as a single hairline groove with a small foreground pill. The
+   `progress` shading is faked with a `background: linear-gradient` keyed
+   off a CSS custom property the component sets per-render — that lets the
+   gradient stop match `currentTime / duration` exactly. */
+.scrubber-range {
+  --scrubber-range-progress: 0%;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  height: 16px;
+  background: transparent;
+  outline: none;
+}
+.scrubber-range::-webkit-slider-runnable-track {
+  height: 3px;
+  background: linear-gradient(
+    to right,
+    color-mix(in oklab, var(--foreground) 90%, transparent) 0%,
+    color-mix(in oklab, var(--foreground) 90%, transparent) var(--scrubber-range-progress),
+    color-mix(in oklab, var(--foreground) 18%, transparent) var(--scrubber-range-progress),
+    color-mix(in oklab, var(--foreground) 18%, transparent) 100%
+  );
+  border-radius: 0;
+}
+.scrubber-range::-moz-range-track {
+  height: 3px;
+  background: color-mix(in oklab, var(--foreground) 18%, transparent);
+  border-radius: 0;
+}
+.scrubber-range::-moz-range-progress {
+  height: 3px;
+  background: color-mix(in oklab, var(--foreground) 90%, transparent);
+}
+.scrubber-range::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 10px;
+  height: 14px;
+  margin-top: -5.5px;
+  background: var(--foreground);
+  border: 1px solid color-mix(in oklab, var(--background) 50%, transparent);
+  border-radius: 0;
+  cursor: pointer;
+  transition: transform 80ms ease;
+}
+.scrubber-range::-webkit-slider-thumb:hover {
+  transform: scaleY(1.15);
+}
+.scrubber-range::-moz-range-thumb {
+  width: 10px;
+  height: 14px;
+  background: var(--foreground);
+  border: 1px solid color-mix(in oklab, var(--background) 50%, transparent);
+  border-radius: 0;
+  cursor: pointer;
+  transition: transform 80ms ease;
+}
+.scrubber-range::-moz-range-thumb:hover {
+  transform: scaleY(1.15);
+}
+.scrubber-range:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 35%, transparent);
+}
+.scrubber-range:focus-visible::-moz-range-thumb {
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 35%, transparent);
+}
