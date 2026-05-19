@@ -229,6 +229,10 @@ export interface CallListItem {
    *  offered one. */
   discountGiven: number;
   turnCount: number;
+  /** Voice platform the gateway used for this call — `'vapi'`, `'telnyx'`,
+   *  or `null` for rows from before the column existed. Surfaced as a
+   *  PlatformBadge in the calls table. */
+  voiceProvider: string | null;
 }
 
 export interface CallListFilters {
@@ -280,6 +284,7 @@ export async function loadCallList(filters: CallListFilters = {}): Promise<CallL
     customerName: r.customer?.name ?? null,
     discountGiven: r.discountGiven,
     turnCount: r._count.turns,
+    voiceProvider: r.voiceProvider,
   }));
 }
 
