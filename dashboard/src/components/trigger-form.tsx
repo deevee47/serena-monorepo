@@ -109,7 +109,7 @@ export function TriggerForm({ products, defaultProductId }: TriggerFormProps) {
           {state.ok && state.callId ? (
             <p className="mt-1 text-xs">
               Call id: <code className="rounded bg-background/60 px-1">{state.callId}</code>{' '}
-              <Link href={`/live/${state.callId}`} className="inline-flex items-center gap-1 underline">
+              <Link href={`/live/${encodeURIComponent(state.callId)}`} className="inline-flex items-center gap-1 underline">
                 <Broadcast className="size-3" />
                 Tail it
               </Link>

@@ -11,7 +11,16 @@ export default async function LiveTailPage({
 }: {
   params: Promise<{ callId: string }>;
 }) {
-  const { callId } = await params;
+  const { callId: raw } = await params;
+  // Same `v3:...` colon-encoding tolerance as /calls/[callId] — see the
+  // detail page for the rationale.
+  const callId = (() => {
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw;
+    }
+  })();
   return (
     <>
       <PageHeader

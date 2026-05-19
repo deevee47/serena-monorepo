@@ -60,7 +60,7 @@ export default async function LivePage() {
                       </TableCell>
                       <TableCell className="text-right">
                         <Button asChild size="sm" variant="ff">
-                          <Link href={`/live/${call.callId}`}>
+                          <Link href={`/live/${encodeURIComponent(call.callId)}`}>
                             <Broadcast className="size-3" />
                             Tail
                           </Link>
