@@ -99,7 +99,10 @@ export function CallInsightsSection({ callId, initial, callInFlight, compact = f
   // ends, the worker fires `insights_ready` on the bus — apply it without
   // waiting for the next poll tick.
   useEffect(() => {
-    if (!callInFlight && status === 'READY') return;
+    // Skip the SSE entirely for ended calls whose insight is in a terminal
+    // state — re-opening just to receive a `call_ended` frame and immediately
+    // close would burn requests.
+    if (!callInFlight && (status === 'READY' || status === 'FAILED')) return;
 
     const es = new EventSource(`/api/live/${encodeURIComponent(callId)}/stream`);
     es.onmessage = (e) => {
@@ -107,6 +110,16 @@ export function CallInsightsSection({ callId, initial, callInFlight, compact = f
       try {
         evt = JSON.parse(e.data);
       } catch {
+        return;
+      }
+      // Server emits `call_ended` and closes the stream when the Call row's
+      // endedAt fires. Without an explicit es.close() here, EventSource's
+      // default auto-reconnect kicks in and the server closes again — a
+      // tight reconnect loop that shows up as nonstop `stream` requests in
+      // the Network panel for an ended call. Close from the client so the
+      // loop stops at the first frame.
+      if (evt.type === 'call_ended') {
+        es.close();
         return;
       }
       if (evt.type === 'insights_pending') {
