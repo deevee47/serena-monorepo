@@ -1,12 +1,17 @@
 import crypto from 'crypto';
-import got from 'got';
 import { z } from 'zod';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { config } from '../config/env.js';
 import { redis } from '../lib/redis.js';
 import { prisma } from '../lib/prisma.js';
 import { AppError, ErrorCodes } from '../utils/errors.js';
-import type { VapiAssistantOverrides } from '../types/vapi.types.js';
+import { getVoiceProvider, voiceProvider, type ProviderName } from '../services/voice-provider/index.js';
+import type { CallLocale } from '../services/voice-provider/types.js';
+import { generateOpener, type CallMode } from '../services/opener.service.js';
+
+function parseProviderOverride(value: unknown): ProviderName | null {
+  return value === 'vapi' || value === 'telnyx' ? value : null;
+}
 
 function checkAdminSecret(headers: FastifyRequest['headers']): boolean {
   const adminSecret = headers['x-admin-secret'] as string | undefined;
@@ -20,7 +25,20 @@ const triggerSchema = z.object({
   product_id: z.string().min(1),
   trigger_reason: z.enum(['cart_abandon', 'page_view', 'wishlist', 'manual']),
   metadata: z.record(z.string(), z.unknown()).optional(),
+  /** Optional dashboard-driven override; falls back to VOICE_PROVIDER env. */
+  provider: z.enum(['vapi', 'telnyx']).optional(),
 });
+
+async function resolveLocale(phoneNumber: string): Promise<CallLocale> {
+  // Pick voice based on the customer's timezone if we know them — Indian
+  // numbers usually answer in Hindi/Hinglish, US in English. Falls back to
+  // English when we have no record of the customer.
+  const customerRow = await prisma.customer
+    .findUnique({ where: { phone: phoneNumber }, select: { timezone: true } })
+    .catch(() => null);
+  const tz = customerRow?.timezone ?? null;
+  return tz === 'Asia/Kolkata' || tz === 'Asia/Calcutta' ? 'hi' : 'en';
+}
 
 export default async function callsRoutes(app: FastifyInstance) {
   app.post('/calls/trigger', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -34,101 +52,124 @@ export default async function callsRoutes(app: FastifyInstance) {
         error: { code: ErrorCodes.INVALID_PAYLOAD, message: 'Invalid request body', details: parsed.error.flatten() },
       });
     }
-    const { phone_number, product_id, trigger_reason, metadata } = parsed.data;
+    const { phone_number, product_id, trigger_reason, metadata, provider: providerOverride } =
+      parsed.data;
 
     const today = new Date().toISOString().slice(0, 10);
     const limitKey = `call_limit:${phone_number}:${today}`;
     const callCount = await redis.get(limitKey);
-    if (callCount !== null && parseInt(callCount, 10) >= 3) {
+    if (callCount !== null && parseInt(callCount as string, 10) >= 3) {
       return reply.status(429).send({ error: { code: 'RATE_LIMITED', message: 'Call limit reached for this number today' } });
     }
 
-    // Pick voice based on the customer's timezone if we know them — Indian
-    // numbers usually answer in Hindi/Hinglish, US in English. Falls back to
-    // English when we have no record of the customer.
-    const customerRow = await prisma.customer
-      .findUnique({ where: { phone: phone_number }, select: { timezone: true } })
-      .catch(() => null);
-    const tz = customerRow?.timezone ?? null;
-    const isIndianTz = tz === 'Asia/Kolkata' || tz === 'Asia/Calcutta';
-    const voiceId = isIndianTz ? config.VAPI_VOICE_HI : config.VAPI_VOICE_EN;
+    const locale = await resolveLocale(phone_number);
 
-    const overrides: VapiAssistantOverrides = {
-      // Sales pace beats default Vapi pacing for this use case.
-      silenceTimeoutSeconds: 12,
-      responseDelaySeconds: 0.4,
-      numWordsToInterruptAssistant: 2,
-      backchannelingEnabled: true,
-      endCallPhrases: ['bye', 'goodbye', 'thank you bye', 'alvida', 'rakhti hoon'],
-    };
-    if (voiceId) {
-      // Default provider — Vapi maps the ID through 11labs/playht/azure
-      // depending on the assistant config; we let the assistant pick.
-      overrides.voice = { provider: '11labs', voiceId };
-    }
-    if (config.VAPI_CUSTOM_LLM_URL) {
-      overrides.model = {
-        provider: 'custom-llm',
-        url: config.VAPI_CUSTOM_LLM_URL,
-        model: 'serena-converse',
-        authorization: `Bearer ${config.VAPI_WEBHOOK_SECRET}`,
-      };
-    }
+    const provider = providerOverride ? getVoiceProvider(providerOverride) : voiceProvider();
 
-    let vapiCallId: string;
+    let callId: string;
     try {
-      const vapiRes = await got.post('https://api.vapi.ai/call/phone', {
-        headers: { Authorization: `Bearer ${config.VAPI_API_KEY}` },
-        json: {
-          assistantId: config.VAPI_ASSISTANT_ID,
-          assistantOverrides: overrides,
-          ...(config.VAPI_PHONE_NUMBER_ID
-            ? { phoneNumberId: config.VAPI_PHONE_NUMBER_ID }
-            : {}),
-          customer: { number: phone_number },
-          metadata: { product_id, trigger_reason, ...metadata },
-        },
-      }).json<{ id: string }>();
-      vapiCallId = vapiRes.id;
+      const result = await provider.createPhoneCall({
+        phoneNumber: phone_number,
+        productId: product_id,
+        triggerReason: trigger_reason,
+        locale,
+        metadata,
+      });
+      callId = result.callId;
     } catch (err) {
-      // Surface the underlying Vapi error so the curl response is debuggable.
-      let vapiBody: unknown = undefined;
-      let vapiStatus: number | undefined;
+      // Surface the underlying provider error so the curl response is debuggable.
+      let providerBody: unknown = undefined;
+      let providerStatus: number | undefined;
       if (typeof err === 'object' && err !== null && 'response' in err) {
         const resp = (err as { response?: { statusCode?: number; body?: unknown } }).response;
-        vapiStatus = resp?.statusCode;
-        vapiBody = resp?.body;
+        providerStatus = resp?.statusCode;
+        providerBody = resp?.body;
       }
-      request.log.error({ err, vapi_status: vapiStatus, vapi_body: vapiBody }, 'Vapi call initiation failed');
+      request.log.error(
+        { err, provider_status: providerStatus, provider_body: providerBody },
+        'Voice provider call initiation failed',
+      );
       throw new AppError(
         502,
-        'VAPI_REJECTED',
-        `Vapi rejected the call (HTTP ${vapiStatus ?? '?'})`,
-        vapiBody,
+        'PROVIDER_REJECTED',
+        `Voice provider rejected the call (HTTP ${providerStatus ?? '?'})`,
+        providerBody,
       );
     }
 
-    await redis.setex(`pending_call:${vapiCallId}`, 60, JSON.stringify({ productId: product_id, triggerReason: trigger_reason }));
+    await redis.setex(
+      `pending_call:${callId}`,
+      60,
+      JSON.stringify({ productId: product_id, triggerReason: trigger_reason }),
+    );
     await redis.incr(limitKey);
     await redis.expire(limitKey, 86400);
 
-    return reply.status(202).send({ call_id: vapiCallId });
+    return reply.status(202).send({ call_id: callId });
   });
 
   app.get('/calls/web-config', async (request: FastifyRequest, reply: FastifyReply) => {
     if (!checkAdminSecret(request.headers)) {
       return reply.status(403).send({ error: { code: 'FORBIDDEN', message: 'Invalid admin secret' } });
     }
-    if (!config.VAPI_PUBLIC_KEY) {
+    const query = request.query as { provider?: string } | undefined;
+    const override = parseProviderOverride(query?.provider);
+    const activeProvider = override ? getVoiceProvider(override) : voiceProvider();
+    try {
+      const cfg = await activeProvider.getWebClientConfig();
+      return reply.send({
+        provider: cfg.provider,
+        mode: cfg.mode,
+        token: cfg.token,
+        target: cfg.target,
+        assistant_id: cfg.assistantId ?? cfg.target,
+        // Legacy field names — preserve so older dashboard builds still work
+        // for the Vapi path.
+        public_key: cfg.token,
+      });
+    } catch (err) {
+      request.log.error({ err }, 'web config unavailable');
       return reply.status(503).send({
-        error: { code: 'NOT_CONFIGURED', message: 'VAPI_PUBLIC_KEY env var is not set' },
+        error: { code: 'NOT_CONFIGURED', message: 'Web client config not available' },
       });
     }
-    return reply.send({
-      public_key: config.VAPI_PUBLIC_KEY,
-      assistant_id: config.VAPI_ASSISTANT_ID,
-    });
   });
+
+  app.post('/calls/opener', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!checkAdminSecret(request.headers)) {
+      return reply.status(403).send({ error: { code: 'FORBIDDEN', message: 'Invalid admin secret' } });
+    }
+    const body = request.body as
+      | { mode?: CallMode; product_id?: string | null }
+      | undefined;
+    const mode = body?.mode === 'INBOUND_PRESALES' || body?.mode === 'OUTBOUND_RECOVERY'
+      ? body.mode
+      : null;
+    if (!mode) {
+      return reply.status(422).send({
+        error: { code: ErrorCodes.INVALID_PAYLOAD, message: 'mode must be INBOUND_PRESALES or OUTBOUND_RECOVERY' },
+      });
+    }
+    const opener = await generateOpener({ mode, productId: body?.product_id ?? null });
+    return reply.send({ opener });
+  });
+
+  app.get(
+    '/calls/by-bridge/:uuid',
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      if (!checkAdminSecret(request.headers)) {
+        return reply.status(403).send({ error: { code: 'FORBIDDEN', message: 'Invalid admin secret' } });
+      }
+      const { uuid } = request.params as { uuid: string };
+      const callId = await redis.get(`web_call_bridge:${uuid}`).catch(() => null);
+      if (!callId) {
+        return reply.status(404).send({
+          error: { code: 'NOT_FOUND', message: 'No bridge entry for that uuid (yet?)' },
+        });
+      }
+      return reply.send({ call_id: callId });
+    },
+  );
 
   app.get('/calls/:id/recording', async (request: FastifyRequest, reply: FastifyReply) => {
     if (!checkAdminSecret(request.headers)) {
@@ -138,35 +179,36 @@ export default async function callsRoutes(app: FastifyInstance) {
 
     const row = await prisma.call.findUnique({
       where: { callId: id },
-      select: { recordingUrl: true, stereoRecordingUrl: true },
+      select: { recordingUrl: true, stereoRecordingUrl: true, providerRecordingId: true },
     });
-    if (row?.recordingUrl || row?.stereoRecordingUrl) {
-      return reply.send({
-        recording_url: row.recordingUrl,
-        stereo_recording_url: row.stereoRecordingUrl,
-      });
-    }
 
-    // Fall back to Vapi if the webhook hasn't persisted the URL yet.
+    // Always fetch fresh from the provider. Telnyx's recording URLs are
+    // presigned S3 links with a ~10min expiry, so caching the URL in
+    // `Call.recordingUrl` would hand the player a stale link the second
+    // time the page is opened. We DO cache `providerRecordingId` (a stable
+    // UUID) so subsequent lookups skip the list-filter step and hit the
+    // singular endpoint instead.
+    const lookupId = row?.providerRecordingId ?? id;
     try {
-      const vapiCall = await got
-        .get(`https://api.vapi.ai/call/${encodeURIComponent(id)}`, {
-          headers: { Authorization: `Bearer ${config.VAPI_API_KEY}` },
-        })
-        .json<{ recordingUrl?: string | null; stereoRecordingUrl?: string | null }>();
-      const recordingUrl = vapiCall.recordingUrl ?? null;
-      const stereoRecordingUrl = vapiCall.stereoRecordingUrl ?? null;
-      if (recordingUrl || stereoRecordingUrl) {
+      const recording = await voiceProvider().getCall(lookupId);
+      // Persist the recording_id when we discover one — turns a v3:...
+      // call_control_id lookup into a UUID lookup on the next request.
+      if (recording.recordingId && recording.recordingId !== row?.providerRecordingId) {
         await prisma.call
           .update({
             where: { callId: id },
-            data: { recordingUrl, stereoRecordingUrl },
+            data: { providerRecordingId: recording.recordingId },
           })
           .catch(() => undefined);
       }
       return reply.send({
-        recording_url: recordingUrl,
-        stereo_recording_url: stereoRecordingUrl,
+        recording_url: recording.recordingUrl,
+        stereo_recording_url: recording.stereoRecordingUrl,
+        // ISO timestamp the provider began recording (Telnyx: `recording_started_at`).
+        // The dashboard scrubber uses this as the timeline anchor so turn
+        // positions match the audio file instead of our late-bound
+        // `Call.createdAt`. Null when the provider doesn't expose it.
+        recording_started_at: recording.recordingStartedAt ?? null,
       });
     } catch (err) {
       let status: number | undefined;
@@ -176,12 +218,12 @@ export default async function callsRoutes(app: FastifyInstance) {
       if (status === 404) {
         return reply
           .status(404)
-          .send({ error: { code: 'NOT_FOUND', message: 'Call not found in Vapi' } });
+          .send({ error: { code: 'NOT_FOUND', message: 'Call not found at provider' } });
       }
-      request.log.error({ err, callId: id }, 'Vapi recording fetch failed');
+      request.log.error({ err, callId: id }, 'provider recording fetch failed');
       return reply
         .status(502)
-        .send({ error: { code: 'VAPI_ERROR', message: 'Failed to fetch recording from Vapi' } });
+        .send({ error: { code: 'PROVIDER_ERROR', message: 'Failed to fetch recording from provider' } });
     }
   });
 }
