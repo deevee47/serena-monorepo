@@ -11,6 +11,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { OutcomeBadge } from '@/components/outcome-badge';
+import { PlatformBadge } from '@/components/platform-badge';
 import { PageHeader } from '@/components/page-header';
 import { loadCallList } from '@/lib/db-queries';
 import { formatDuration, formatRelative } from '@/lib/utils';
@@ -153,6 +154,7 @@ export default async function CallsPage({
                   <TableHead>When</TableHead>
                   <TableHead>Customer</TableHead>
                   <TableHead>Product</TableHead>
+                  <TableHead>Platform</TableHead>
                   <TableHead>Discount</TableHead>
                   <TableHead>Outcome</TableHead>
                   <TableHead className="text-right">Turns</TableHead>
@@ -162,7 +164,7 @@ export default async function CallsPage({
               <TableBody>
                 {calls.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={7} className="text-center text-muted-foreground">
+                    <TableCell colSpan={8} className="text-center text-muted-foreground">
                       No calls match these filters.
                     </TableCell>
                   </TableRow>
@@ -171,7 +173,7 @@ export default async function CallsPage({
                     <TableRow key={call.callId}>
                       <TableCell>
                         <Link
-                          href={`/calls/${call.callId}`}
+                          href={`/calls/${encodeURIComponent(call.callId)}`}
                           className="text-foreground hover:underline"
                         >
                           {formatRelative(call.createdAt)}
@@ -182,6 +184,9 @@ export default async function CallsPage({
                       </TableCell>
                       <TableCell className="text-muted-foreground">
                         {call.productId ?? '—'}
+                      </TableCell>
+                      <TableCell>
+                        <PlatformBadge provider={call.voiceProvider} />
                       </TableCell>
                       <TableCell>
                         {call.discountGiven > 0 ? (
