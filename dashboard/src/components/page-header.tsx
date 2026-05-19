@@ -1,6 +1,7 @@
 import { Fragment, type ReactNode } from 'react';
 import Link from 'next/link';
 import { LiveCallsIndicator } from '@/components/live-calls-indicator';
+import { ProviderSelector } from '@/components/provider-selector';
 import { ThemeToggle } from '@/components/theme-toggle';
 import {
   Breadcrumb,
@@ -12,6 +13,7 @@ import {
 } from '@/components/ui/breadcrumb';
 import { Separator } from '@/components/ui/separator';
 import { SidebarTrigger } from '@/components/ui/sidebar';
+import { getProviderOverride, type ProviderName } from '@/lib/provider';
 import { cn } from '@/lib/utils';
 
 export interface BreadcrumbItemDef {
@@ -27,7 +29,9 @@ interface PageHeaderProps {
   className?: string;
 }
 
-export function PageHeader({
+const DEFAULT_PROVIDER: ProviderName = 'vapi';
+
+export async function PageHeader({
   title,
   description,
   action,
@@ -35,6 +39,7 @@ export function PageHeader({
   className,
 }: PageHeaderProps) {
   const hasCrumbs = breadcrumbs && breadcrumbs.length > 0;
+  const active = (await getProviderOverride()) ?? DEFAULT_PROVIDER;
   return (
     <header
       className={cn(
@@ -74,6 +79,7 @@ export function PageHeader({
         ) : null}
       </div>
       {action ? <div className="flex items-center">{action}</div> : null}
+      <ProviderSelector active={active} />
       <LiveCallsIndicator />
       <ThemeToggle />
     </header>
