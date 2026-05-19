@@ -1,7 +1,9 @@
 /**
  * Thin proxy to the Serena node-gateway. Server-only — never call from a
- * client component. The gateway holds the admin secret and Vapi creds.
+ * client component. The gateway holds the admin secret and provider creds.
  */
+
+import type { ProviderName } from './provider';
 
 const GATEWAY_URL = process.env.GATEWAY_URL ?? 'http://localhost:3000';
 
@@ -20,6 +22,8 @@ export interface TriggerCallInput {
   product_id: string;
   trigger_reason: TriggerReason;
   metadata?: Record<string, unknown>;
+  /** Dashboard-selected provider; gateway falls back to its env default. */
+  provider?: ProviderName;
 }
 
 export interface TriggerCallResult {
@@ -60,6 +64,10 @@ export interface RecordingResult {
   ok: boolean;
   recordingUrl?: string;
   stereoRecordingUrl?: string;
+  /** ISO timestamp the provider began recording. Used by the dashboard
+   *  scrubber as the timeline anchor (recording start ≠ call.createdAt;
+   *  see the call-scrubber comments for the gap explanation). */
+  recordingStartedAt?: string;
   error?: string;
   status?: number;
 }
@@ -83,11 +91,13 @@ export async function getCallRecording(callId: string): Promise<RecordingResult>
     const data = body as {
       recording_url?: string | null;
       stereo_recording_url?: string | null;
+      recording_started_at?: string | null;
     } | null;
     return {
       ok: true,
       recordingUrl: data?.recording_url ?? undefined,
       stereoRecordingUrl: data?.stereo_recording_url ?? undefined,
+      recordingStartedAt: data?.recording_started_at ?? undefined,
     };
   } catch (err) {
     return {
@@ -116,16 +126,28 @@ export interface LiveSession {
   error?: string;
 }
 
-export interface WebCallConfigResult {
-  ok: boolean;
-  publicKey?: string;
-  assistantId?: string;
-  error?: string;
-}
+export type WebCallConfigResult =
+  | { ok: false; error: string }
+  | {
+      ok: true;
+      provider: 'vapi';
+      publicKey: string;
+      assistantId: string;
+    }
+  | {
+      ok: true;
+      provider: 'telnyx';
+      assistantId: string;
+    };
 
-export async function getWebCallConfig(): Promise<WebCallConfigResult> {
+export async function getWebCallConfig(
+  override?: ProviderName,
+): Promise<WebCallConfigResult> {
   try {
-    const res = await fetch(`${GATEWAY_URL}/calls/web-config`, {
+    const url = override
+      ? `${GATEWAY_URL}/calls/web-config?provider=${encodeURIComponent(override)}`
+      : `${GATEWAY_URL}/calls/web-config`;
+    const res = await fetch(url, {
       headers: adminHeaders(),
       cache: 'no-store',
     });
@@ -138,16 +160,80 @@ export async function getWebCallConfig(): Promise<WebCallConfigResult> {
           `gateway returned ${res.status}`,
       };
     }
-    const data = body as { public_key?: string; assistant_id?: string } | null;
-    if (!data?.public_key || !data.assistant_id) {
-      return { ok: false, error: 'gateway returned an incomplete config' };
+    const data = body as {
+      provider?: 'vapi' | 'telnyx';
+      mode?: 'public_key' | 'jwt' | 'anonymous';
+      token?: string;
+      target?: string;
+      assistant_id?: string;
+      public_key?: string;
+    } | null;
+    if (!data) {
+      return { ok: false, error: 'gateway returned no body' };
     }
-    return { ok: true, publicKey: data.public_key, assistantId: data.assistant_id };
+
+    if (data.provider === 'telnyx') {
+      // We only do anonymous WebRTC against AI assistants — the JWT/DID path
+      // is dormant on the gateway side. The dashboard treats every Telnyx
+      // config the same: pass assistantId through to @telnyx/ai-agent-lib.
+      const assistantId = data.assistant_id;
+      if (!assistantId) {
+        return { ok: false, error: 'gateway returned a Telnyx config without assistant_id' };
+      }
+      return { ok: true, provider: 'telnyx', assistantId };
+    }
+
+    const publicKey = data.token ?? data.public_key;
+    const assistantId = data.assistant_id ?? data.target;
+    if (!publicKey || !assistantId) {
+      return { ok: false, error: 'gateway returned an incomplete Vapi config' };
+    }
+    return { ok: true, provider: 'vapi', publicKey, assistantId };
   } catch (err) {
     return {
       ok: false,
       error: err instanceof Error ? err.message : 'gateway unreachable',
     };
+  }
+}
+
+export type CallMode = 'INBOUND_PRESALES' | 'OUTBOUND_RECOVERY';
+
+/**
+ * Ask the gateway for the call opener. The pool + weighted selection live
+ * server-side in `opener.service.ts` so both providers (and PSTN) get the
+ * same set without forking client-side variants.
+ */
+export async function generateOpener(input: {
+  mode: CallMode;
+  product_id?: string | null;
+}): Promise<string | null> {
+  try {
+    const res = await fetch(`${GATEWAY_URL}/calls/opener`, {
+      method: 'POST',
+      headers: adminHeaders(),
+      body: JSON.stringify(input),
+      cache: 'no-store',
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { opener?: string } | null;
+    return body?.opener ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function getCallByBridge(uuid: string): Promise<string | null> {
+  try {
+    const res = await fetch(
+      `${GATEWAY_URL}/calls/by-bridge/${encodeURIComponent(uuid)}`,
+      { headers: adminHeaders(), cache: 'no-store' },
+    );
+    if (!res.ok) return null;
+    const body = (await res.json()) as { call_id?: string } | null;
+    return body?.call_id ?? null;
+  } catch {
+    return null;
   }
 }
 

@@ -27,6 +27,7 @@
     "typescript": "^5"
   },
   "dependencies": {
-    "@prisma/client": "5"
+    "@prisma/client": "5",
+    "tweetnacl": "^1.0.3"
   }
 }
