@@ -3,8 +3,20 @@
 import * as React from 'react';
 import { Sparkle, User, Wrench } from '@phosphor-icons/react/dist/ssr';
 import { Badge } from '@/components/ui/badge';
+import { SEEK_AUDIO_EVENT, type SeekAudioDetail } from '@/components/call-scrubber';
 import { cn } from '@/lib/utils';
 import { SentimentDot, type TranscriptTurn } from '@/components/transcript';
+
+/** Bubble-side seek dispatcher. Mirrors the one in Transcript so both
+ *  views feel identical when clicked. */
+function seekAudioTo(offsetSec: number | null | undefined): void {
+  if (typeof offsetSec !== 'number') return;
+  window.dispatchEvent(
+    new CustomEvent<SeekAudioDetail>(SEEK_AUDIO_EVENT, {
+      detail: { offsetSec },
+    }),
+  );
+}
 
 interface ChatViewProps {
   turns: TranscriptTurn[];
@@ -80,13 +92,29 @@ export function ChatView({
       {visibleTurns.map((turn, i) => {
         const isAgent = turn.speaker === 'AGENT';
         const hasText = turn.utterance.trim().length > 0;
+        const seekable = typeof turn.offsetSec === 'number';
         return (
           <div
             key={i}
             data-turn-index={turn.turnNumber ?? undefined}
+            onClick={seekable ? () => seekAudioTo(turn.offsetSec) : undefined}
+            onKeyDown={
+              seekable
+                ? (e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      seekAudioTo(turn.offsetSec);
+                    }
+                  }
+                : undefined
+            }
+            role={seekable ? 'button' : undefined}
+            tabIndex={seekable ? 0 : undefined}
+            title={seekable ? 'Click to play this moment in the recording' : undefined}
             className={cn(
               'turn-row flex w-full gap-3 transition-colors',
               isAgent ? 'justify-start' : 'justify-end',
+              seekable && 'cursor-pointer rounded-md hover:bg-secondary/40 focus:outline-none focus:ring-1 focus:ring-ring -mx-2 px-2 py-1',
             )}
           >
             {isAgent ? (

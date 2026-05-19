@@ -1,5 +1,6 @@
 import { Wrench } from '@phosphor-icons/react/dist/ssr';
 import { Badge } from '@/components/ui/badge';
+import { SEEK_AUDIO_EVENT, type SeekAudioDetail } from '@/components/call-scrubber';
 import { cn } from '@/lib/utils';
 
 export interface TranscriptTurn {
@@ -20,6 +21,22 @@ export interface TranscriptTurn {
    *  before / after speaking the visible utterance). */
   observations?: Array<{ name: string; args?: Record<string, unknown> }>;
   timestamp?: string | Date | null;
+  /** Seconds from the start of the call recording, computed on the page
+   *  from (turn.timestamp - call.createdAt). When present, the row becomes
+   *  clickable and seeks `CallRecordingPlayer` to that offset. */
+  offsetSec?: number | null;
+}
+
+/** Click handler shared by Transcript + ChatView rows. Dispatches the
+ *  seek-audio event the player listens for. Wrapped so behavior stays
+ *  consistent between the two views. */
+function seekAudioTo(offsetSec: number | null | undefined): void {
+  if (typeof offsetSec !== 'number') return;
+  window.dispatchEvent(
+    new CustomEvent<SeekAudioDetail>(SEEK_AUDIO_EVENT, {
+      detail: { offsetSec },
+    }),
+  );
 }
 
 /** Colored dot next to the objection chip — telegraphs caller emotional state
@@ -84,13 +101,30 @@ export function Transcript({ turns, emptyHint, fill = false }: TranscriptProps) 
         fill && 'min-h-0 flex-1 overflow-y-auto',
       )}
     >
-      {visible.map((turn, i) => (
+      {visible.map((turn, i) => {
+        const seekable = typeof turn.offsetSec === 'number';
+        return (
         <li
           key={i}
           data-turn-index={turn.turnNumber ?? undefined}
+          onClick={seekable ? () => seekAudioTo(turn.offsetSec) : undefined}
+          onKeyDown={
+            seekable
+              ? (e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    seekAudioTo(turn.offsetSec);
+                  }
+                }
+              : undefined
+          }
+          role={seekable ? 'button' : undefined}
+          tabIndex={seekable ? 0 : undefined}
+          title={seekable ? 'Click to play this moment in the recording' : undefined}
           className={cn(
             'turn-row flex gap-4 px-6 py-4 transition-colors',
             turn.speaker === 'AGENT' ? 'bg-secondary/30' : '',
+            seekable && 'cursor-pointer hover:bg-secondary/60 focus:outline-none focus:ring-1 focus:ring-ring',
           )}
         >
           <div className="w-16 shrink-0 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
@@ -153,7 +187,8 @@ export function Transcript({ turns, emptyHint, fill = false }: TranscriptProps) 
             </div>
           </div>
         </li>
-      ))}
+        );
+      })}
     </ul>
   );
 }
