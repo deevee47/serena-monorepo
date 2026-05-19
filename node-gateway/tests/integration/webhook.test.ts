@@ -1,6 +1,15 @@
 import { describe, it, expect, mock } from 'bun:test';
-import { buildApp } from '../../src/app.js';
-import { config } from '../../src/config/env.js';
+import { config as realConfig } from '../../src/config/env.js';
+
+// Force-pin VOICE_PROVIDER=vapi for this suite regardless of the developer's
+// local .env. Otherwise flipping the env to telnyx for live testing breaks
+// these webhook-shape assertions which are Vapi-specific.
+mock.module('../../src/config/env.js', () => ({
+  config: { ...realConfig, VOICE_PROVIDER: 'vapi' },
+}));
+
+const { buildApp } = await import('../../src/app.js');
+const config = { ...realConfig, VOICE_PROVIDER: 'vapi' as const };
 
 // Mock brain service so tests don't hit OpenAI
 mock.module('../../src/services/brain.service.js', () => ({
@@ -13,7 +22,10 @@ mock.module('../../src/services/brain.service.js', () => ({
 mock.module('../../src/services/db.service.js', () => ({
   createCallRecord: async () => {},
   updateCallRecord: async () => {},
-  insertCallTurn: async () => {},
+  insertCallTurn: async () => 'turn-test-id',
+  getCachedCallContext: async () => ({ customer: null, cart: null, primaryProductId: null }),
+  getRecentTurnSignals: async () => null,
+  loadCallContext: async () => ({ customer: null, cart: null, primaryProductId: null }),
 }));
 
 // Mock redis so tests don't need a running Redis
@@ -25,6 +37,7 @@ mock.module('../../src/lib/redis.js', () => ({
     incr: async () => 1,
     expire: async () => 1,
     del: async () => 1,
+    ping: async () => 'PONG',
   },
 }));
 
