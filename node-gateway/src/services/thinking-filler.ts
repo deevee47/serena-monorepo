@@ -72,3 +72,59 @@ export function isDisfluencyOpener(text: string): boolean {
   const head = text.trimStart().slice(0, 32).toLowerCase();
   return /^(hmm|uhh?|umm|let me|lemme|okay so|right —|ek second|ek minute|haan toh|haan ji)/.test(head);
 }
+
+// ─── Rolling per-tool latency tracker ─────────────────────────────────────
+// We measure how long each observation tool's full round-trip takes (from
+// the brain emitting `thinking` to the brain emitting `observation`). When
+// a tool's p50 sits under SUPPRESS_THRESHOLD_MS, the dead-air filler arrives
+// AFTER the answer would have anyway — stacking a "let me check —" on top
+// of an already-fast result sounds robotic, so we skip it.
+//
+// In-memory sliding window per tool. Process-local — fine for the
+// single-instance gateway we run today. If we ever shard, this needs to
+// move to Redis (HGET p50 per tool); the API surface stays identical.
+
+const WINDOW_SIZE = 8;
+/** Below this median latency, suppress the filler. Headroom over the typical
+ *  TTS-cue latency (~150-250ms): if the tool answers faster than that, the
+ *  filler is just noise. */
+const SUPPRESS_THRESHOLD_MS = 280;
+/** Need at least this many samples before the suppression decision becomes
+ *  authoritative. Below it, we always emit — better to risk one redundant
+ *  filler than to drop one during a tool's first warmup invocation. */
+const MIN_SAMPLES_TO_SUPPRESS = 3;
+
+const latencyWindow: Map<string, number[]> = new Map();
+
+/** Record an observation-tool round-trip latency for the rolling window. */
+export function recordObservationLatency(toolName: string, ms: number): void {
+  if (!toolName || !Number.isFinite(ms) || ms < 0) return;
+  const buf = latencyWindow.get(toolName) ?? [];
+  buf.push(ms);
+  if (buf.length > WINDOW_SIZE) buf.shift();
+  latencyWindow.set(toolName, buf);
+}
+
+function p50(values: number[]): number {
+  if (values.length === 0) return Number.POSITIVE_INFINITY;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 0) {
+    return Math.round(((sorted[mid - 1] ?? 0) + (sorted[mid] ?? 0)) / 2);
+  }
+  return sorted[mid] ?? 0;
+}
+
+/** True iff the gateway should emit a thinking-filler for this tool. False
+ *  when the rolling p50 says we'll get the result back before the filler
+ *  would finish reading. Test seam: latency window is process-local. */
+export function shouldEmitFiller(toolName: string): boolean {
+  const buf = latencyWindow.get(toolName) ?? [];
+  if (buf.length < MIN_SAMPLES_TO_SUPPRESS) return true;
+  return p50(buf) >= SUPPRESS_THRESHOLD_MS;
+}
+
+/** Test-only: reset the in-memory window. Not exported via the index. */
+export function _resetLatencyWindowForTest(): void {
+  latencyWindow.clear();
+}

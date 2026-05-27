@@ -20,6 +20,7 @@ import { createCallLogger } from '../utils/logger.js';
 import { redis } from '../lib/redis.js';
 import {
   ensureSessionForCall,
+  getSession,
   updateSession,
   getRecentHistory,
 } from '../services/session.service.js';
@@ -35,10 +36,12 @@ import {
   toProductContext,
 } from '../services/product.service.js';
 import { getCachedCallContext, getRecentTurnSignals } from '../services/db.service.js';
-import { persistTurnPair } from '../services/turn-persist.service.js';
+import { persistOpenerIfMissing, persistTurnPair } from '../services/turn-persist.service.js';
 import {
   detectFillerLanguage,
   isDisfluencyOpener,
+  recordObservationLatency,
+  shouldEmitFiller,
   thinkingFillerFor,
 } from '../services/thinking-filler.js';
 import { detectLlmProvider, getVoiceProvider } from '../services/voice-provider/index.js';
@@ -216,7 +219,12 @@ async function llmCompletionsHandler(request: FastifyRequest, reply: FastifyRepl
     typeof env.metadata['product_id'] === 'string'
       ? (env.metadata['product_id'] as string)
       : null;
-  const ensured = await ensureSessionForCall({ callId, phoneNumber, metadataProductId });
+  const ensured = await ensureSessionForCall({
+    callId,
+    phoneNumber,
+    metadataProductId,
+    voiceProvider: provider.name,
+  });
   let session = ensured.session;
   const triggerProvidedProduct = ensured.productFromTrigger;
   if (ensured.isNew) {
@@ -243,6 +251,17 @@ async function llmCompletionsHandler(request: FastifyRequest, reply: FastifyRepl
         .reverse()
         .find((m) => m.role === 'user' && typeof m.content === 'string');
       const utterance = lastUserMessage?.content ?? '';
+
+      // Pre-response latency = gap between the previous AGENT turn finishing
+      // TTS and this USER turn arriving. We don't have a provider-side
+      // timestamp here on every transport (Vapi exposes it on some events,
+      // Telnyx doesn't expose it consistently in the LLM envelope), so we
+      // measure from our own session.lastAgentFinishedAt. Skip the first
+      // turn (no prior agent reply to anchor against).
+      const turnReceivedAt = Date.now();
+      const currentUserLatencyMs = session.lastAgentFinishedAt
+        ? Math.max(0, turnReceivedAt - new Date(session.lastAgentFinishedAt).getTime())
+        : null;
 
       // ── Live customer + cart context ───────────────────────────────────
       // Cached per-call on Redis so we hit Postgres once per call, not once
@@ -296,6 +315,21 @@ async function llmCompletionsHandler(request: FastifyRequest, reply: FastifyRepl
       }
       await Promise.allSettled(signalLookups);
 
+      // Layer session-derived signals onto whatever the DB-derived snapshot
+      // gave us. The DB only knows about persisted USER turns, so:
+      //   - push_attempt comes from session state (incremented at turn
+      //     persistence time, never inferred from transcript).
+      //   - response_latency_ms is the gap we just measured for THIS turn
+      //     (fresher than whatever was on the previous USER row).
+      if (recentSignals === null) {
+        recentSignals = { sentiments: [] };
+      }
+      recentSignals = {
+        ...recentSignals,
+        push_attempt: session.pushAttempt > 0 ? session.pushAttempt : null,
+        response_latency_ms: currentUserLatencyMs,
+      };
+
       // Real abandoned cart from DB when we have one; otherwise fall back to
       // the synthetic single-product cart so the agent still has something
       // to reference.
@@ -315,6 +349,31 @@ async function llmCompletionsHandler(request: FastifyRequest, reply: FastifyRepl
               abandoned_minutes_ago: null,
             }
           : null);
+
+      // Backfill Vapi's locally-spoken first message (its `firstMessage`
+      // assistant-config line, e.g. "Hi, this is Sera from Muscleblaze...")
+      // as AGENT turn 1. Vapi TTSes that line itself and never round-trips
+      // it through this endpoint, so without this hook the opener is
+      // missing from the chat + transcript + live tail.
+      //
+      // Detection: on the very first turn (session.turnCount === 0), any
+      // assistant message in body.messages before the first user message
+      // is Vapi's opener. We persist it once, idempotently, then refresh
+      // the session snapshot so isOpener no longer fires for the response
+      // we're about to compute.
+      if (session.turnCount === 0) {
+        const vapiOpener = body.messages.find(
+          (m) =>
+            m.role === 'assistant' &&
+            typeof m.content === 'string' &&
+            m.content.trim().length > 0,
+        );
+        if (vapiOpener && typeof vapiOpener.content === 'string') {
+          await persistOpenerIfMissing(callId, vapiOpener.content);
+          const refreshed = await getSession(callId).catch(() => null);
+          if (refreshed) session = refreshed;
+        }
+      }
 
       // Conversation history. Prefer Redis session history (authoritative —
       // contains the agent's actually-streamed text, including turns the
@@ -389,6 +448,16 @@ async function llmCompletionsHandler(request: FastifyRequest, reply: FastifyRepl
         args: Record<string, unknown>;
         result: Record<string, unknown>;
       }> = [];
+      // Per-observation latency in ms — measured from the brain's `thinking`
+      // event (just before it awaits the tool) to the corresponding
+      // `observation` event (when the result arrives). Persisted on the
+      // AGENT turn for the dashboard + for the thinking-filler trimmer's
+      // rolling p50.
+      const observationLatencies: Array<{ name: string; ms: number }> = [];
+      // pending thinking-event timestamps keyed by tool name — popped on the
+      // matching observation event. Tools that don't fire `thinking` (none
+      // today, but future-safe) just won't produce a latency entry.
+      const pendingThinking: Map<string, number> = new Map();
 
       // Filler language: prefer the customer's actual reply, fall back to timezone.
       const fillerLang = detectFillerLanguage({
@@ -417,9 +486,18 @@ async function llmCompletionsHandler(request: FastifyRequest, reply: FastifyRepl
               publishLive(callId, { type: 'text_delta', delta });
             },
             onThinking: (toolName) => {
+              pendingThinking.set(toolName, Date.now());
               // Suppress if the LLM already opened with its own disfluency cue —
               // stacked "hmm — let me check —" sounds wrong.
               if (isDisfluencyOpener(fullText)) return;
+              // Suppress also if the rolling p50 latency for this tool is
+              // fast enough that the filler would arrive AFTER the result
+              // and just sound robotic. Trims dead-air openers on
+              // cache-warm get_review_summary / check_inventory hits.
+              if (!shouldEmitFiller(toolName)) {
+                log.debug({ tool: toolName }, 'thinking filler skipped (fast tool)');
+                return;
+              }
               const filler = thinkingFillerFor(toolName, fillerLang);
               fullText += filler;
               sendChunk({ content: filler });
@@ -433,6 +511,13 @@ async function llmCompletionsHandler(request: FastifyRequest, reply: FastifyRepl
               // `CallTurn.observationsCalled`, and double-publishing would
               // duplicate the chip via LiveTail's pendingObservationsRef.
               observations.push(obs);
+              const start = pendingThinking.get(obs.name);
+              if (start !== undefined) {
+                const ms = Math.max(0, Date.now() - start);
+                observationLatencies.push({ name: obs.name, ms });
+                recordObservationLatency(obs.name, ms);
+                pendingThinking.delete(obs.name);
+              }
             },
           },
         );
@@ -475,6 +560,16 @@ async function llmCompletionsHandler(request: FastifyRequest, reply: FastifyRepl
         return;
       }
 
+      // Record TTS-finished marker for the next turn's latency computation.
+      // (Approximate — true TTS-finished comes from the provider's
+      // tts-ended event, which we don't reliably get on every transport. The
+      // bias is consistent across turns so the relative latency signal
+      // remains useful.)
+      const agentFinishedAt = new Date().toISOString();
+      updateSession(callId, { lastAgentFinishedAt: agentFinishedAt }).catch((err) =>
+        log.warn({ err }, 'lastAgentFinishedAt update failed (non-fatal)'),
+      );
+
       // ── Persist turns and update session (best-effort, off the response path)
       await persistTurnPair({
         callId,
@@ -483,6 +578,10 @@ async function llmCompletionsHandler(request: FastifyRequest, reply: FastifyRepl
         agentText: fullText,
         dispatch,
         observations,
+        userResponseLatencyMs: currentUserLatencyMs,
+        observationLatenciesMs:
+          observationLatencies.length > 0 ? observationLatencies : null,
+        recentSignals,
       });
 
       const discountAmount =
