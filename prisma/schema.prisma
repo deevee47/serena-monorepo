@@ -159,9 +159,7 @@ model Call {
   endedAt         DateTime?   @map("ended_at")
   durationSeconds Int?        @map("duration_seconds")
   outcome         CallOutcome?
-  finalScore      Int?        @map("final_score")
   discountGiven   Int         @default(0) @map("discount_given")
-  stageReached    String?     @map("stage_reached")
   productId       String?     @map("product_id")
   recordingUrl       String?    @map("recording_url")
   stereoRecordingUrl String?    @map("stereo_recording_url")
@@ -209,15 +207,18 @@ model CallTurn {
   objectionType    String?    @map("objection_type")
   objectionSubtype String?    @map("objection_subtype")
   sentiment        Sentiment?
-  scoreBefore      Int        @map("score_before")
-  scoreAfter       Int        @map("score_after")
-  stage            String
   discountOffered  Int?       @map("discount_offered")
   // Tool attribution under the converse pipeline. Only set on AGENT turns
   // when the LLM picked a tool. Null for text-only turns and USER turns.
   toolCalled         String?    @map("tool_called")
   toolArgs           Json?      @map("tool_args")
   observationsCalled Json?      @map("observations_called")
+  // Turn-quality signals. See 20260522120000 migration for the contract.
+  // pushAttempt is set on AGENT turns; responseLatencyMs on USER turns;
+  // observationLatenciesMs on AGENT turns that ran observation tools.
+  pushAttempt            Int?     @map("push_attempt")
+  responseLatencyMs      Int?     @map("response_latency_ms")
+  observationLatenciesMs Json?    @map("observation_latencies_ms")
   createdAt          DateTime   @default(now()) @map("created_at")
   call             Call       @relation(fields: [callId], references: [callId])
 

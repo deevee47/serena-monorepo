@@ -29,15 +29,13 @@ logger.info('BullMQ workers starting');
 const callEndWorker = new Worker<CallEndJobData>(
   'call-end-queue',
   async (job) => {
-    const { callId, outcome, finalScore, discountGiven, stageReached, durationSeconds, phoneNumber } = job.data;
+    const { callId, outcome, discountGiven, durationSeconds, phoneNumber } = job.data;
     const log = logger.child({ call_id: callId, job_id: job.id });
 
     await updateCallRecord(callId, {
       endedAt: new Date(),
       outcome,
-      finalScore,
       discountGiven,
-      stageReached,
       durationSeconds,
     });
 
@@ -67,7 +65,6 @@ const callEndWorker = new Worker<CallEndJobData>(
     log.info(
       {
         outcome,
-        finalScore,
         tool_dispatch_summary: toolSummary,
         checkout_fired: (toolSummary['send_whatsapp_checkout_link'] ?? 0) > 0,
       },
@@ -113,9 +110,9 @@ const insightsWorker = new Worker<InsightsJobData>(
 const analyticsWorker = new Worker<AnalyticsJobData>(
   'analytics-queue',
   async (job) => {
-    const { callId, outcome, finalScore, discountGiven, stageReached, turnCount } = job.data;
+    const { callId, outcome, discountGiven, turnCount } = job.data;
     logger.info(
-      { call_id: callId, outcome, finalScore, discountGiven, stageReached, turnCount },
+      { call_id: callId, outcome, discountGiven, turnCount },
       'analytics: call completed',
       // TODO: send to Mixpanel, Segment, or analytics pipeline
     );

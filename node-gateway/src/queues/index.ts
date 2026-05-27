@@ -13,9 +13,7 @@ export const redisConnection = {
 export type CallEndJobData = {
   callId: string;
   outcome: 'CONVERTED' | 'DROPPED' | 'NO_ANSWER' | 'ERROR';
-  finalScore: number;
   discountGiven: number;
-  stageReached: string;
   turnCount: number;
   phoneNumber: string;
   productId: string;
@@ -25,9 +23,7 @@ export type CallEndJobData = {
 export type AnalyticsJobData = {
   callId: string;
   outcome: string;
-  finalScore: number;
   discountGiven: number;
-  stageReached: string;
   turnCount: number;
 };
 
