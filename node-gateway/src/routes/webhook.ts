@@ -20,6 +20,7 @@ interface RequestWithRawBody extends FastifyRequest {
 
 async function handleCallStarted(
   event: Extract<NormalizedVoiceEvent, { kind: 'call.started' }>,
+  voiceProvider?: string,
 ): Promise<void> {
   const metadataProductId =
     typeof event.metadata['product_id'] === 'string'
@@ -29,6 +30,7 @@ async function handleCallStarted(
     callId: event.callId,
     phoneNumber: event.phoneNumber ?? 'unknown',
     metadataProductId,
+    voiceProvider,
   });
 
   // Web calls embed a bridgeUuid (client-generated) in client_state so the
@@ -69,9 +71,7 @@ async function handleCallEnded(
   await callEndQueue.add('call-end', {
     callId: event.callId,
     outcome,
-    finalScore: 0, // deprecated under converse pipeline
     discountGiven,
-    stageReached: outcome === 'CONVERTED' ? 'CONVERTED' : 'DROPPED',
     turnCount: session.turnCount,
     phoneNumber: session.phoneNumber,
     productId: session.currentProductId,
@@ -81,9 +81,7 @@ async function handleCallEnded(
   await analyticsQueue.add('analytics', {
     callId: event.callId,
     outcome,
-    finalScore: 0,
     discountGiven,
-    stageReached: outcome,
     turnCount: session.turnCount,
   });
 
@@ -197,7 +195,7 @@ export default async function webhookRoutes(app: FastifyInstance) {
           e.kind === 'call.started' && Boolean(e.respondWithAssistantId),
       );
       if (initEvent) {
-        await handleCallStarted(initEvent);
+        await handleCallStarted(initEvent, provider.name);
         return reply.send({ assistantId: initEvent.respondWithAssistantId });
       }
 
@@ -207,7 +205,7 @@ export default async function webhookRoutes(app: FastifyInstance) {
         try {
           switch (event.kind) {
             case 'call.started':
-              await handleCallStarted(event);
+              await handleCallStarted(event, provider.name);
               break;
             case 'call.ended':
               await handleCallEnded(event);
@@ -253,7 +251,7 @@ export default async function webhookRoutes(app: FastifyInstance) {
       try {
         switch (event.kind) {
           case 'call.started':
-            await handleCallStarted(event);
+            await handleCallStarted(event, 'telnyx');
             break;
           case 'call.ended':
             await handleCallEnded(event);

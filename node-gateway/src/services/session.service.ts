@@ -54,6 +54,7 @@ export async function createSession(input: SessionCreateInput): Promise<CallSess
     stage: ConversationStage.INTRO,
     score: 50,
     discountsOffered: [],
+    pushAttempt: 0,
     objectionsEncountered: [],
     conversationHistory: [],
     turnCount: 0,
@@ -61,6 +62,7 @@ export async function createSession(input: SessionCreateInput): Promise<CallSess
     closeAttempted: false,
     followUpRequested: false,
     followUpNote: null,
+    lastAgentFinishedAt: null,
     createdAt: now,
     lastUpdatedAt: now,
     isActive: true,
@@ -149,8 +151,13 @@ export async function ensureSessionForCall(params: {
   callId: string;
   phoneNumber: string;
   metadataProductId: string | null;
+  /** Provider that actually initiated this call. Falls back to the global
+   *  env default when omitted (legacy callers). Threaded through so a
+   *  Vapi-initiated call doesn't get tagged "telnyx" just because the env
+   *  default points there. */
+  voiceProvider?: string;
 }): Promise<EnsureSessionResult> {
-  const { callId, phoneNumber, metadataProductId } = params;
+  const { callId, phoneNumber, metadataProductId, voiceProvider } = params;
 
   const existing = await getSession(callId);
   if (existing) {
@@ -203,7 +210,7 @@ export async function ensureSessionForCall(params: {
 
   const session = await createSession({ callId, phoneNumber, productId });
 
-  createCallRecord(session, config.VOICE_PROVIDER).catch((err) =>
+  createCallRecord(session, voiceProvider ?? config.VOICE_PROVIDER).catch((err) =>
     logger.error({ err, callId }, 'createCallRecord failed in ensureSessionForCall'),
   );
 
