@@ -95,6 +95,15 @@ class RecentUserSignals(BaseModel):
     filler_density: float | None = None  # 0.0 – 1.0
     length_trend: float | None = None    # tokens-per-turn slope across recent turns
     repeated_objection: str | None = None  # objection_type repeated on consecutive turns
+    # Explicit 1..5 persistence counter — set by the gateway from session
+    # state so the prompt knows exactly which attempt the LLM is on instead of
+    # inferring it from the transcript. Resets on FAST_TRACK confirmation or
+    # a positive sentiment swing.
+    push_attempt: int | None = None
+    # Pre-response latency on the immediately prior USER turn, in ms. Very low
+    # (<500) = visceral; high (>5000) = distracted/considering. Sourced from
+    # provider webhook timestamps.
+    response_latency_ms: int | None = None
 
 
 class CustomerContext(BaseModel):
