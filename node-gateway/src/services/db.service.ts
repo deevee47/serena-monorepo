@@ -15,9 +15,6 @@ export interface CallTurnData {
   objectionType?: string | null;
   objectionSubtype?: string | null;
   sentiment?: 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL' | null;
-  scoreBefore: number;
-  scoreAfter: number;
-  stage: string;
   discountOffered?: number | null;
   // Side-effect tool attribution. Only set on AGENT turns when the LLM
   // picked a tool. Null for text-only turns and USER turns.
@@ -32,6 +29,10 @@ export interface CallTurnData {
     args: Record<string, unknown>;
     result: Record<string, unknown>;
   }> | null;
+  // Turn-quality signals (migration 20260522120000).
+  pushAttempt?: number | null;          // AGENT turns only — 1..5
+  responseLatencyMs?: number | null;    // USER turns only — ms
+  observationLatenciesMs?: Array<{ name: string; ms: number }> | null;
 }
 
 export interface CallTurnAnalyticsUpdate {
@@ -44,9 +45,7 @@ export interface CallEndUpdate {
   endedAt?: Date;
   durationSeconds?: number;
   outcome?: 'CONVERTED' | 'DROPPED' | 'NO_ANSWER' | 'ERROR';
-  finalScore?: number;
   discountGiven?: number;
-  stageReached?: string;
 }
 
 export async function createCallRecord(
@@ -90,13 +89,13 @@ export async function insertCallTurn(callId: string, turn: CallTurnData): Promis
       objectionType: turn.objectionType ?? null,
       objectionSubtype: turn.objectionSubtype ?? null,
       sentiment: turn.sentiment ?? null,
-      scoreBefore: turn.scoreBefore,
-      scoreAfter: turn.scoreAfter,
-      stage: turn.stage,
       discountOffered: turn.discountOffered ?? null,
       toolCalled: turn.toolCalled ?? null,
       toolArgs: (turn.toolArgs ?? null) as never,
       observationsCalled: (turn.observationsCalled ?? null) as never,
+      pushAttempt: turn.pushAttempt ?? null,
+      responseLatencyMs: turn.responseLatencyMs ?? null,
+      observationLatenciesMs: (turn.observationLatenciesMs ?? null) as never,
     },
     select: { id: true },
   });
@@ -258,7 +257,11 @@ export async function loadCallContext(phoneNumber: string): Promise<LoadedCallCo
 /** Read the last n USER turns and derive a small RecentUserSignals snapshot
  *  the brain can react to. The classifier-analytics worker writes
  *  `sentiment` + `objectionType` async — by turn N+1, turn N-1's tags are
- *  usually in place. Missing values just degrade the signal, never block. */
+ *  usually in place. Missing values just degrade the signal, never block.
+ *
+ *  Also surfaces the most recent USER `responseLatencyMs` (set by the
+ *  gateway from provider webhook timestamps when available) so the prompt
+ *  can fold pre-response latency into its adaptive behavior. */
 export async function getRecentTurnSignals(
   callId: string,
   n: number = 3,
@@ -267,7 +270,12 @@ export async function getRecentTurnSignals(
     where: { callId, speaker: 'USER' },
     orderBy: { turnNumber: 'desc' },
     take: n,
-    select: { utterance: true, sentiment: true, objectionType: true },
+    select: {
+      utterance: true,
+      sentiment: true,
+      objectionType: true,
+      responseLatencyMs: true,
+    },
   });
 
   // Reverse so callers see oldest-first (the natural reading order).
@@ -291,11 +299,19 @@ export async function getRecentTurnSignals(
   const fillerDensity = computeFillerDensity(utterances);
   const lengthTrend = computeUtteranceLengthTrend(utterances);
 
+  // Most recent user latency — the one that just landed, if we measured it.
+  const latestLatency =
+    ordered.length > 0 ? ordered[ordered.length - 1]?.responseLatencyMs ?? null : null;
+
   return {
     sentiments,
     filler_density: fillerDensity,
     length_trend: lengthTrend,
     repeated_objection: repeatedObjection,
+    response_latency_ms: latestLatency,
+    // push_attempt is layered in by the caller from session state — this
+    // function doesn't know which AGENT turns "burned" an attempt and which
+    // were FAST_TRACK confirmations.
   };
 }
 

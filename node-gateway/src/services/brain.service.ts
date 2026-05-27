@@ -74,6 +74,12 @@ export type RecentUserSignalsPayload = {
   filler_density?: number | null;
   length_trend?: number | null;
   repeated_objection?: string | null;
+  // Explicit 1..5 persistence counter, layered in from session state by the
+  // gateway so the prompt no longer has to infer the attempt count.
+  push_attempt?: number | null;
+  // Pre-response latency on the most recent USER turn, ms. Sourced from
+  // provider webhook timestamps.
+  response_latency_ms?: number | null;
 };
 
 export type ToolName = 'send_whatsapp_checkout_link' | 'send_whatsapp_product_info';
