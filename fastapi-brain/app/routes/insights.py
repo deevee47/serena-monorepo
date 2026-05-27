@@ -12,6 +12,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from openai import AsyncOpenAI
+from prisma import Json
 from pydantic import BaseModel, ConfigDict
 
 from app.config.settings import settings
@@ -156,8 +157,8 @@ async def generate_insight(
             "emotions": [],
             "sentimentTrend": "stable",
             "sentimentConfidence": 0.0,
-            "serviceConcerns": [],
-            "tags": [],
+            "serviceConcerns": Json([]),
+            "tags": Json([]),
             "modelUsed": None,
             "fallbackUsed": False,
             "errorMessage": None,
@@ -239,8 +240,8 @@ async def generate_insight(
         "emotions": emotions,
         "sentimentTrend": trend,
         "sentimentConfidence": confidence,
-        "serviceConcerns": service_concerns,
-        "tags": tags,
+        "serviceConcerns": Json(service_concerns),
+        "tags": Json(tags),
         "modelUsed": model,
         "fallbackUsed": False,
         "promptTokens": prompt_tokens,
