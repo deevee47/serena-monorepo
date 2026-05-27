@@ -5,7 +5,13 @@ import { Sparkle, User, Wrench } from '@phosphor-icons/react/dist/ssr';
 import { Badge } from '@/components/ui/badge';
 import { SEEK_AUDIO_EVENT, type SeekAudioDetail } from '@/components/call-scrubber';
 import { cn } from '@/lib/utils';
-import { SentimentDot, type TranscriptTurn } from '@/components/transcript';
+import {
+  DiscountChip,
+  LatencyChip,
+  PushAttemptChip,
+  SentimentDot,
+  type TranscriptTurn,
+} from '@/components/transcript';
 
 /** Bubble-side seek dispatcher. Mirrors the one in Transcript so both
  *  views feel identical when clicked. */
@@ -64,7 +70,9 @@ export function ChatView({
     const hasChips =
       !!t.toolCalled ||
       (t.observations && t.observations.length > 0) ||
-      !!t.objectionType;
+      !!t.objectionType ||
+      !!t.pushAttempt ||
+      !!t.discountOffered;
     return hasText || hasChips;
   });
 
@@ -155,6 +163,9 @@ export function ChatView({
                     <span className="ml-1 opacity-70">{formatArgs(turn.toolArgs)}</span>
                   </Badge>
                 ) : null}
+                {isAgent ? <PushAttemptChip attempt={turn.pushAttempt} /> : null}
+                {!isAgent ? <LatencyChip ms={turn.responseLatencyMs} /> : null}
+                <DiscountChip pct={turn.discountOffered} />
                 {turn.objectionType ? (
                   <Badge variant="outline" className="font-normal text-[10px]">
                     <SentimentDot sentiment={turn.sentiment} className="mr-1.5" />

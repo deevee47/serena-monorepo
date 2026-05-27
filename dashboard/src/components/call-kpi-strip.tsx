@@ -13,7 +13,13 @@ interface CallKpiStripProps {
   outcome?: string | null;
   durationSeconds?: number | null;
   planId?: string | null;
-  coupon?: string | null;
+  /**
+   * Ordered discount ladder offered across the call — e.g. `[5, 10]` means
+   * the agent first offered 5% then later escalated to 10%. Rendered with
+   * arrows so ops can see at a glance how much the agent burned through
+   * before closing or backing off. Empty array means no discount fired.
+   */
+  discountLadder?: number[];
   sentiment: SentimentCounts;
 }
 
@@ -25,7 +31,7 @@ export function CallKpiStrip({
   outcome,
   durationSeconds,
   planId,
-  coupon,
+  discountLadder,
   sentiment,
 }: CallKpiStripProps) {
   return (
@@ -44,17 +50,47 @@ export function CallKpiStrip({
             <Dash />
           )}
         </Cell>
-        <Cell label="Coupon">
-          {coupon ? (
-            <code className="bg-muted px-1.5 py-0.5 font-mono text-xs">{coupon}</code>
-          ) : (
-            <Dash />
-          )}
+        <Cell label="Discount ladder">
+          <DiscountLadder steps={discountLadder ?? []} />
         </Cell>
         <Cell label="Sentiment">
           {sentiment.total > 0 ? <SentimentBar counts={sentiment} /> : <Dash />}
         </Cell>
       </ul>
+    </div>
+  );
+}
+
+/** Renders the discount escalation in chronological order, e.g. `5% → 10%`.
+ *  Each rung is keyed off the order in which the agent committed to it on the
+ *  call. The final rung is highlighted so ops can see where the call landed
+ *  even when scanning quickly. Renders a dash when no rung was ever offered. */
+function DiscountLadder({ steps }: { steps: number[] }) {
+  if (steps.length === 0) return <Dash />;
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      {steps.map((pct, idx) => {
+        const isLast = idx === steps.length - 1;
+        return (
+          <span key={`${pct}-${idx}`} className="flex items-center gap-1">
+            <code
+              className={cn(
+                'px-1.5 py-0.5 font-mono text-xs tabular-nums',
+                isLast
+                  ? 'bg-ff-orange/15 text-ff-orange'
+                  : 'bg-muted text-foreground',
+              )}
+            >
+              −{pct}%
+            </code>
+            {!isLast ? (
+              <span className="text-muted-foreground/60" aria-hidden>
+                →
+              </span>
+            ) : null}
+          </span>
+        );
+      })}
     </div>
   );
 }
