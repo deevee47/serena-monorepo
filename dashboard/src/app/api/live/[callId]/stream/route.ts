@@ -34,6 +34,11 @@ interface TurnRow {
   toolCalled: string | null;
   toolArgs: unknown;
   observationsCalled: unknown;
+  // Turn-quality signals — surfaced live so chat-view chips render within one
+  // poll tick of the agent / user turn landing in Postgres.
+  pushAttempt: number | null;
+  responseLatencyMs: number | null;
+  discountOffered: number | null;
   turnNumber: number;
   createdAt: Date;
 }
@@ -139,6 +144,9 @@ export async function GET(
                 toolCalled: true,
                 toolArgs: true,
                 observationsCalled: true,
+                pushAttempt: true,
+                responseLatencyMs: true,
+                discountOffered: true,
                 turnNumber: true,
                 createdAt: true,
               },
@@ -155,7 +163,9 @@ export async function GET(
                 type: 'session_init',
                 selectedPlanId: session.currentProductId ?? call?.productId ?? null,
                 callMode: 'OUTBOUND_RECOVERY',
-                stage: session.stage ?? 'INTRO',
+                // Replaces the legacy `stage` machine — pushAttempt is the
+                // new way to read "where in the recovery ladder are we?".
+                pushAttempt: session.pushAttempt ?? 0,
                 couponsApplied: (session.discountsOffered ?? []).map((n) => `−${n}%`),
                 ts: new Date().toISOString(),
               }),
@@ -168,7 +178,15 @@ export async function GET(
             const ts = turn.createdAt.toISOString();
             if (turn.speaker === 'USER') {
               controller.enqueue(
-                jsonEvent({ type: 'user_utterance', utterance: turn.utterance, ts }),
+                jsonEvent({
+                  type: 'user_utterance',
+                  utterance: turn.utterance,
+                  // Pre-response latency in ms (gap between previous AGENT
+                  // TTS-finished and this USER turn arriving). Null on the
+                  // first turn.
+                  responseLatencyMs: turn.responseLatencyMs,
+                  ts,
+                }),
               );
               if (turn.objectionType || turn.sentiment) {
                 controller.enqueue(
@@ -214,7 +232,17 @@ export async function GET(
                 );
               }
               controller.enqueue(
-                jsonEvent({ type: 'agent_turn', utterance: turn.utterance, ts }),
+                jsonEvent({
+                  type: 'agent_turn',
+                  utterance: turn.utterance,
+                  // Persistence-counter chip data — null for the opener and
+                  // for pure clarifications that don't burn an attempt.
+                  pushAttempt: turn.pushAttempt,
+                  // Discount % committed to on this turn (only set when the
+                  // checkout tool fired with a non-zero discount).
+                  discountOffered: turn.discountOffered,
+                  ts,
+                }),
               );
               controller.enqueue(jsonEvent({ type: 'turn_done', ts }));
             }

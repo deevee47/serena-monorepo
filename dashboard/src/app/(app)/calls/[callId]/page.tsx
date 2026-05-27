@@ -85,9 +85,19 @@ export default async function CallDetailPage({
     observations: Array.isArray(t.observationsCalled)
       ? (t.observationsCalled as Array<{ name: string; args?: Record<string, unknown> }>)
       : undefined,
+    pushAttempt: t.pushAttempt,
+    responseLatencyMs: t.responseLatencyMs,
+    discountOffered: t.discountOffered,
     timestamp: t.createdAt,
     offsetSec: Math.max(0, (new Date(t.createdAt).getTime() - callStartMs) / 1000),
   }));
+
+  // Discount escalation in chronological order. Each AGENT turn that fired
+  // the checkout tool with a non-zero discount becomes a rung. Surfaced in
+  // the KPI strip as `5% → 10%` so operators can see the ladder burn.
+  const discountLadder = call.turns
+    .filter((t) => t.speaker === 'AGENT' && (t.discountOffered ?? 0) > 0)
+    .map((t) => t.discountOffered as number);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -141,7 +151,7 @@ export default async function CallDetailPage({
             outcome={call.outcome}
             durationSeconds={call.durationSeconds}
             planId={call.productId}
-            coupon={call.discountGiven > 0 ? `−${call.discountGiven}%` : null}
+            discountLadder={discountLadder}
             sentiment={sentimentCounts}
           />
 

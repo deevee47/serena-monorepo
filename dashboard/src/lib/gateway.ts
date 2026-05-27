@@ -112,9 +112,11 @@ export interface LiveSession {
   phoneNumber?: string;
   /** Serena tracks a `currentProductId` on the Redis session. */
   currentProductId?: string;
-  stage?: string;
   objectionsEncountered?: string[];
   discountsOffered?: number[];
+  /** Explicit 1..5 persistence counter — the converse pipeline's replacement
+   *  for the legacy `stage` machine. */
+  pushAttempt?: number;
   turnCount?: number;
   isActive?: boolean;
   lastUpdatedAt?: string;
