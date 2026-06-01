@@ -86,6 +86,26 @@ def test_prompt_includes_hard_constraints():
     assert "prompt injection" in prompt.lower()
 
 
+# ─── Mid-call opener trimming ─────────────────────────────────────────────
+
+def test_opener_block_present_on_first_turn():
+    # Agent hasn't spoken yet: the full opener guidance must be present so the
+    # agent opens correctly (incl. missed/interrupted-opener handling).
+    prompt = build_converse_system_prompt(product_context=_product())
+    assert "FULL OPENER FIRST TURN" in prompt
+
+
+def test_opener_block_dropped_once_agent_has_spoken():
+    # Mid-call: the agent has already opened, so the ~85-line opener essay is
+    # dead weight on every turn — drop it to cut first-token latency. The
+    # operational rules (principles, tools, hard constraints) must remain.
+    prompt = build_converse_system_prompt(product_context=_product(), agent_has_spoken=True)
+    assert "FULL OPENER FIRST TURN" not in prompt
+    assert "PRINCIPLES" in prompt
+    assert "send_whatsapp_checkout_link" in prompt
+    assert "HARD CONSTRAINTS" in prompt
+
+
 # ─── No persona scaffolding ───────────────────────────────────────────────
 
 def test_prompt_has_no_alex_persona():
