@@ -5,6 +5,7 @@ import { prisma } from '../lib/prisma.js';
 import { redis } from '../lib/redis.js';
 import { ensureSessionForCall, getSession, endSession } from '../services/session.service.js';
 import { callEndQueue, analyticsQueue, crmQueue } from '../queues/index.js';
+import { runIsolated } from '../utils/settle.js';
 import { detectWebhookProvider, getVoiceProvider } from '../services/voice-provider/index.js';
 import { parseTexmlStatusCallback } from '../services/voice-provider/telnyx-provider.js';
 import type { NormalizedVoiceEvent } from '../services/voice-provider/types.js';
@@ -56,42 +57,68 @@ async function handleCallEnded(
   }
 
   // Outcome under the converse pipeline: CONVERTED iff the LLM ever fired
-  // the checkout tool during the call. Anything else is DROPPED.
-  const checkoutTurn = await prisma.callTurn.findFirst({
-    where: { callId: event.callId, toolCalled: 'send_whatsapp_checkout_link' },
-    select: { id: true },
-  });
-  const outcome: 'CONVERTED' | 'DROPPED' = checkoutTurn ? 'CONVERTED' : 'DROPPED';
+  // the checkout tool during the call. Anything else is DROPPED. Compute
+  // defensively — a failed query must not abort end-of-call processing
+  // (endSession + the analytics/CRM enqueues); default to DROPPED.
+  let outcome: 'CONVERTED' | 'DROPPED' = 'DROPPED';
+  try {
+    const checkoutTurn = await prisma.callTurn.findFirst({
+      where: { callId: event.callId, toolCalled: 'send_whatsapp_checkout_link' },
+      select: { id: true },
+    });
+    outcome = checkoutTurn ? 'CONVERTED' : 'DROPPED';
+  } catch (err) {
+    log.error({ err }, 'call.ended outcome query failed — defaulting to DROPPED');
+  }
 
   await endSession(event.callId);
 
   const discountGiven =
     session.discountsOffered.length > 0 ? Math.max(...session.discountsOffered) : 0;
 
-  await callEndQueue.add('call-end', {
-    callId: event.callId,
-    outcome,
-    discountGiven,
-    turnCount: session.turnCount,
-    phoneNumber: session.phoneNumber,
-    productId: session.currentProductId,
-    durationSeconds: event.durationSeconds ?? undefined,
-  });
-
-  await analyticsQueue.add('analytics', {
-    callId: event.callId,
-    outcome,
-    discountGiven,
-    turnCount: session.turnCount,
-  });
-
-  await crmQueue.add('crm-update', {
-    callId: event.callId,
-    phoneNumber: session.phoneNumber,
-    outcome,
-    discount: discountGiven,
-    productId: session.currentProductId,
-  });
+  // Enqueue the three end-of-call jobs with failure isolation: a Redis blip on
+  // one add must not silently drop the others (the webhook returns 200 and the
+  // provider won't retry, so a dropped enqueue is permanent data loss).
+  await runIsolated(
+    [
+      {
+        label: 'call-end',
+        run: () =>
+          callEndQueue.add('call-end', {
+            callId: event.callId,
+            outcome,
+            discountGiven,
+            turnCount: session.turnCount,
+            phoneNumber: session.phoneNumber,
+            productId: session.currentProductId,
+            durationSeconds: event.durationSeconds ?? undefined,
+          }),
+      },
+      {
+        label: 'analytics',
+        run: () =>
+          analyticsQueue.add('analytics', {
+            callId: event.callId,
+            outcome,
+            discountGiven,
+            turnCount: session.turnCount,
+          }),
+      },
+      {
+        label: 'crm-update',
+        run: () =>
+          crmQueue.add('crm-update', {
+            callId: event.callId,
+            phoneNumber: session.phoneNumber,
+            outcome,
+            discount: discountGiven,
+            productId: session.currentProductId,
+          }),
+      },
+    ],
+    (queueLabel, err) =>
+      log.error({ err, queue: queueLabel }, 'end-of-call enqueue failed'),
+  );
 
   log.info({ outcome, discountGiven, turnCount: session.turnCount }, 'Call ended');
 }
