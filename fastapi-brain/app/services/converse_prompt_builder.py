@@ -282,7 +282,7 @@ cart + offer just because they said "hello" first. On this turn:
       <ITEM FROM CART> cart mein chhode hain, <CART TOTAL> — agar abhi
       wrap karein toh {opening_offer_percent}% off de sakti hoon. Order complete karein?"
   - The <ITEM FROM CART> and <CART TOTAL> placeholders MUST be filled
-    from the live CUSTOMER'S CART block in this prompt. NEVER substitute
+    from the live cart block in this prompt. NEVER substitute
     a product or price from these example shapes.
 
   After this compressed opener fires, treat the call as fully opened —
@@ -308,7 +308,7 @@ sentence message:
   4. Ask for the close: "want to finish the order?" Make it a yes/no.
 
 SHAPE (do NOT copy verbatim — substitute the cart items, prices, and
-customer name from the live CUSTOMER'S CART and CUSTOMER PROFILE blocks
+customer name from the live cart and CUSTOMER PROFILE blocks
 below; the angle-bracket placeholders are slots, not product names):
   "Hi <FIRST NAME>, this is {agent_name} from {business_name}. Saw you
   left <CART ITEMS BY NAME> in your cart — comes to <CART TOTAL>. I can
@@ -593,17 +593,27 @@ def build_converse_system_prompt(
     agent_name: str = "Serena",
     business_name: str = "Muscleblaze",
     opening_offer_percent: int = 5,
+    agent_has_spoken: bool = False,
 ) -> str:
     """Compose the system prompt. Customer/cart/product/discounts/agent
-    identity are baked in per call so the LLM has the live snapshot."""
+    identity are baked in per call so the LLM has the live snapshot.
+
+    `agent_has_spoken` lets the caller signal that the agent already opened
+    (i.e. at least one AGENT turn is in the history). When set, the ~85-line
+    call-opening block is omitted — it's pure dead weight mid-call and only
+    inflates per-turn prompt-processing latency on a live voice call. The
+    opener block stays for the not-yet-opened cases (first turn, plus the
+    missed/interrupted-opener variants it documents).
+    """
     sections: list[str] = [
         _objective(agent_name, business_name),
         LANGUAGE_RULES,
         VOICE_RULES,
         DISFLUENCY_AND_HUMOR,
-        _call_opening(agent_name, business_name, opening_offer_percent),
-        _principles(opening_offer_percent),
     ]
+    if not agent_has_spoken:
+        sections.append(_call_opening(agent_name, business_name, opening_offer_percent))
+    sections.append(_principles(opening_offer_percent))
     adaptive = _adaptive_behavior(recent_user_signals)
     if adaptive:
         sections.append(adaptive)

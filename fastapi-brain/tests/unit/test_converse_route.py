@@ -22,6 +22,33 @@ def _async_iter(items):
     return gen()
 
 
+def test_build_inputs_keeps_opener_on_first_turn():
+    from app.models.requests import ConverseRequest
+    from app.routes.converse import _build_inputs
+
+    body = ConverseRequest(call_id="c1", utterance="hi", conversation_history=[])
+    system_prompt, _ = _build_inputs(body)
+    assert "FULL OPENER FIRST TURN" in system_prompt
+
+
+def test_build_inputs_drops_opener_after_agent_has_spoken():
+    from app.models.requests import ConversationTurn, ConverseRequest
+    from app.routes.converse import _build_inputs
+
+    body = ConverseRequest(
+        call_id="c1",
+        utterance="how much is it",
+        conversation_history=[
+            ConversationTurn(speaker="AGENT", utterance="Hi, this is Serena…", timestamp="2026-06-01T00:00:00Z"),
+            ConversationTurn(speaker="USER", utterance="hmm", timestamp="2026-06-01T00:00:05Z"),
+        ],
+    )
+    system_prompt, _ = _build_inputs(body)
+    assert "FULL OPENER FIRST TURN" not in system_prompt
+    # Operational guidance still present mid-call.
+    assert "PRINCIPLES" in system_prompt
+
+
 @pytest.mark.asyncio
 async def test_converse_text_only_response():
     fake = {"text": "Got it.", "tool_call": None, "finish_reason": "stop"}

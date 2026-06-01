@@ -32,6 +32,9 @@ router = APIRouter()
 
 
 def _build_inputs(body: ConverseRequest) -> tuple[str, list[dict]]:
+    # The agent has already opened iff there's at least one AGENT turn in the
+    # history. When it has, the opener block is dropped to cut per-turn latency.
+    agent_has_spoken = any(t.speaker == "AGENT" for t in body.conversation_history)
     system_prompt = build_converse_system_prompt(
         product_context=body.product_context,
         alternative_product_context=body.alternative_product_context,
@@ -43,6 +46,7 @@ def _build_inputs(body: ConverseRequest) -> tuple[str, list[dict]]:
         agent_name=body.agent_name,
         business_name=body.business_name,
         opening_offer_percent=body.opening_offer_percent,
+        agent_has_spoken=agent_has_spoken,
     )
     messages = build_chat_messages(
         utterance=body.utterance,
