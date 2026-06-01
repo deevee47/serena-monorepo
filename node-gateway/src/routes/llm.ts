@@ -30,6 +30,7 @@ import {
   type CartContextPayload,
 } from '../services/brain.service.js';
 import { dispatchToolCall } from '../services/converse-dispatcher.js';
+import { checkSpokenDiscount } from '../services/discount-guard.js';
 import {
   findAlternativeProduct,
   getProductById,
@@ -240,7 +241,9 @@ async function llmCompletionsHandler(request: FastifyRequest, reply: FastifyRepl
   // as the `X-Bridge-UUID` custom header in the browser's startConversation.
   const bridgeUuid = extractBridgeUuid(env.metadata);
   if (bridgeUuid) {
-    await redis
+    // Fire-and-forget: this is a dashboard-only convenience write and must not
+    // sit on the per-turn dead-air path before the first spoken token.
+    void redis
       .setex(`web_call_bridge:${bridgeUuid}`, WEB_BRIDGE_TTL_SECONDS, callId)
       .catch((err) =>
         log.warn({ err, bridgeUuid }, 'web_call_bridge write failed (non-fatal)'),
@@ -272,8 +275,14 @@ async function llmCompletionsHandler(request: FastifyRequest, reply: FastifyRepl
       // If the call was triggered without an explicit product_id, prefer
       // the customer's actually-abandoned product over the prod-001 default.
       if (!triggerProvidedProduct && loaded.primaryProductId && session.currentProductId === 'prod-001') {
-        await updateSession(callId, { currentProductId: loaded.primaryProductId });
+        // Update the in-memory session synchronously (this turn uses it), but
+        // persist fire-and-forget — the Redis write must not gate first-token.
+        // It's idempotent: if the next turn races ahead of the write, it just
+        // re-applies the same override.
         session = { ...session, currentProductId: loaded.primaryProductId };
+        void updateSession(callId, { currentProductId: loaded.primaryProductId }).catch((err) =>
+          log.warn({ err }, 'product-override updateSession failed (non-fatal)'),
+        );
       }
 
       const product = getProductById(session.currentProductId);
@@ -588,6 +597,24 @@ async function llmCompletionsHandler(request: FastifyRequest, reply: FastifyRepl
         dispatch?.toolName === 'send_whatsapp_checkout_link'
           ? (dispatch.appliedArgs['discount_percent'] as number | undefined) ?? null
           : null;
+
+      // Reconcile the SPOKEN discount (free LLM text, now TTS'd to the
+      // customer) against what the link actually applied + the absolute cap.
+      // We can't un-speak it, but a divergence is a verbal-commitment liability
+      // worth alarming on. Fires even with no checkout (a bare verbal promise).
+      const discountCheck = checkSpokenDiscount(fullText, discountAmount ?? 0);
+      if (discountCheck.exceedsCap || discountCheck.exceedsApplied) {
+        log.warn(
+          {
+            spoken_discount_percent: discountCheck.spokenPercent,
+            applied_discount_percent: discountCheck.appliedPercent,
+            exceeds_cap: discountCheck.exceedsCap,
+            exceeds_applied: discountCheck.exceedsApplied,
+            tool: dispatch?.toolName ?? null,
+          },
+          'discount_divergence: agent spoke a discount above the cap or above what the link applied',
+        );
+      }
 
   log.info(
     {
