@@ -8,11 +8,10 @@ All functions are defensive — when data is missing or the product_id is
 unknown they return a structured 'unknown' / empty result rather than
 raising, so the model can decide what to do."""
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from prisma import Prisma
-
 
 # ─── check_inventory ────────────────────────────────────────────────────────
 
@@ -37,7 +36,10 @@ async def check_inventory(db: Prisma, product_id: str) -> dict[str, Any]:
     low_stock = in_stock <= LOW_STOCK_THRESHOLD
     restock_eta_days: int | None = None
     if product.restockEta is not None and in_stock == 0:
-        delta = product.restockEta - datetime.utcnow()
+        # restockEta is tz-aware (Postgres timestamptz) — compare against a
+        # tz-aware now, not naive utcnow() (which raises TypeError and is
+        # deprecated).
+        delta = product.restockEta - datetime.now(UTC)
         restock_eta_days = max(0, delta.days)
 
     return {
@@ -52,7 +54,7 @@ async def check_inventory(db: Prisma, product_id: str) -> dict[str, Any]:
 
 
 async def get_recent_purchases(db: Prisma, product_id: str, days: int) -> dict[str, Any]:
-    since = datetime.utcnow() - timedelta(days=days)
+    since = datetime.now(UTC) - timedelta(days=days)
     count = await db.purchase.count(
         where={
             "productId": product_id,
@@ -66,20 +68,32 @@ async def get_recent_purchases(db: Prisma, product_id: str, days: int) -> dict[s
 
 
 async def get_review_summary(db: Prisma, product_id: str) -> dict[str, Any]:
-    reviews = await db.productreview.find_many(
-        where={"productId": product_id},
-        order={"helpful": "desc"},
-    )
-    if not reviews:
+    # DB-side aggregation instead of loading every review into Python: a count,
+    # a grouped average, and one ordered row each for the top positive/critical
+    # quote. Four bounded queries vs. an unbounded full-table scan.
+    count = await db.productreview.count(where={"productId": product_id})
+    if not count:
         return {"product_id": product_id, "count": 0, "avg_rating": None,
                 "top_positive_quote": None, "top_critical_quote": None}
 
-    count = len(reviews)
-    avg = round(sum(r.rating for r in reviews) / count, 2)
+    grouped = await db.productreview.group_by(
+        by=["productId"],
+        where={"productId": product_id},
+        avg={"rating": True},
+    )
+    avg_raw = grouped[0]["_avg"]["rating"] if grouped else None
+    avg = round(avg_raw, 2) if avg_raw is not None else None
 
-    # Top quotes: highest-helpful 4-5 star and highest-helpful <=3 star.
-    positive = next((r for r in reviews if r.rating >= 4), None)
-    critical = next((r for r in reviews if r.rating <= 3), None)
+    # Top quotes: highest-helpful 4-5 star and highest-helpful <=3 star — the
+    # same selection the old in-Python scan made, now pushed to the DB.
+    positive = await db.productreview.find_first(
+        where={"productId": product_id, "rating": {"gte": 4}},
+        order={"helpful": "desc"},
+    )
+    critical = await db.productreview.find_first(
+        where={"productId": product_id, "rating": {"lte": 3}},
+        order={"helpful": "desc"},
+    )
 
     return {
         "product_id": product_id,
@@ -133,6 +147,16 @@ async def get_available_offers(db: Prisma, product_id: str) -> dict[str, Any]:
     if not offers:
         return {"product_id": product_id, "offers": []}
 
+    # Batch the bundle-product lookups into one query instead of a find_unique
+    # per BUNDLE offer (N+1).
+    bundle_ids = list(
+        {o.bundleProductId for o in offers if o.type == "BUNDLE" and o.bundleProductId}
+    )
+    bundles_by_id: dict[str, Any] = {}
+    if bundle_ids:
+        bundles = await db.product.find_many(where={"id": {"in": bundle_ids}})
+        bundles_by_id = {b.id: b for b in bundles}
+
     rendered: list[dict[str, Any]] = []
     for o in offers:
         item: dict[str, Any] = {
@@ -143,7 +167,7 @@ async def get_available_offers(db: Prisma, product_id: str) -> dict[str, Any]:
             "description": o.description,
         }
         if o.type == "BUNDLE" and o.bundleProductId:
-            bundle = await db.product.find_unique(where={"id": o.bundleProductId})
+            bundle = bundles_by_id.get(o.bundleProductId)
             if bundle:
                 item["bundle_product"] = {
                     "product_id": bundle.id,
