@@ -1,5 +1,5 @@
 import type { CallSession } from '../types/session.types.js';
-import { appendTurn, getSession, updateSession } from './session.service.js';
+import { mutateSession } from './session.service.js';
 import type { RecentUserSignalsPayload } from './brain.service.js';
 import { insertCallTurn } from './db.service.js';
 import { classifyAnalyticsQueue } from '../queues/index.js';
@@ -66,15 +66,28 @@ export async function persistOpenerIfMissing(
   openerText: string,
 ): Promise<void> {
   if (!openerText.trim()) return;
-  const session = await getSession(callId);
-  if (!session) return;
-  // turnCount > 0 means we already persisted something for this call; nothing
-  // to backfill. The check here is cheap and keeps the function idempotent
-  // even if the caller's session snapshot was slightly stale.
-  if (session.turnCount > 0) return;
 
-  const now = new Date();
-  await appendTurn(callId, { speaker: 'AGENT', utterance: openerText, timestamp: now });
+  // Atomic check-and-append: the turnCount > 0 guard and the append run inside
+  // one per-call lock, so a concurrent first turn can't slip between them and
+  // produce a duplicate opener / colliding turn number. turnCount > 0 means we
+  // already persisted something for this call — nothing to backfill.
+  let appended = false;
+  try {
+    await mutateSession(callId, (s) => {
+      if (s.turnCount > 0) return {}; // no-op
+      appended = true;
+      return {
+        conversationHistory: [
+          ...s.conversationHistory,
+          { speaker: 'AGENT', utterance: openerText, timestamp: new Date() },
+        ],
+        turnCount: s.turnCount + 1,
+      };
+    });
+  } catch {
+    return; // session missing → nothing to backfill
+  }
+  if (!appended) return;
   // Best-effort Postgres insert. If a race puts a turn 1 here from somewhere
   // else, the unique-ish (callId, turnNumber) collision will surface as a
   // log line — the live conversation continues either way.
@@ -149,44 +162,59 @@ export async function persistTurnPair(params: {
   const discountAmount = checkoutFired
     ? ((dispatch?.appliedArgs['discount_percent'] as number | undefined) ?? 0)
     : 0;
-  let nextPushAttempt: number;
-  if (checkoutFired) {
-    nextPushAttempt = 0;
-  } else if (isOpener) {
-    nextPushAttempt = 0;
-  } else if (
-    isRealPush({
-      isOpener,
-      dispatch,
-      observations,
-      discountAmount,
-      currentUserUtterance: utterance,
-      recentSignals,
-    })
-  ) {
-    nextPushAttempt = Math.min(MAX_PUSH_ATTEMPT, session.pushAttempt + 1);
-  } else {
-    nextPushAttempt = session.pushAttempt;
-  }
-  const agentTurnPushAttempt = nextPushAttempt > 0 ? nextPushAttempt : null;
+  // Decide HOW the push counter changes from stable, turn-local inputs. The
+  // actual value is applied to the freshly-read session inside the atomic
+  // mutation below, so a concurrent turn can't make us increment off a stale
+  // base.
+  const pushOp: 'reset' | 'increment' | 'keep' =
+    checkoutFired || isOpener
+      ? 'reset'
+      : isRealPush({
+            isOpener,
+            dispatch,
+            observations,
+            discountAmount,
+            currentUserUtterance: utterance,
+            recentSignals,
+          })
+        ? 'increment'
+        : 'keep';
 
-  // Track checkout-link discount on session so the next prompt knows the LLM
-  // already offered that tier and shouldn't repeat it.
-  const sessionUpdates: Partial<CallSession> = { pushAttempt: nextPushAttempt };
-  if (checkoutFired) {
-    const offered = (dispatch?.appliedArgs['discount_percent'] as number | undefined) ?? 0;
-    if (offered > 0 && !session.discountsOffered.includes(offered)) {
-      sessionUpdates.discountsOffered = [...session.discountsOffered, offered];
-    }
-  }
-  await updateSession(callId, sessionUpdates);
-
+  // ── Single atomic read-modify-write ────────────────────────────────────
+  // pushAttempt, discountsOffered, both turns, and turnCount all move together
+  // under one per-call lock. This replaces three separate GET-merge-SET cycles
+  // (updateSession + 2× appendTurn) that a concurrent turn could interleave
+  // with — losing the increment or producing duplicate turn numbers.
   const now = new Date();
-  await appendTurn(callId, { speaker: 'USER', utterance, timestamp: now });
-  await appendTurn(callId, { speaker: 'AGENT', utterance: agentText, timestamp: new Date() });
+  const userTurn = { speaker: 'USER' as const, utterance, timestamp: now };
+  const agentTurn = { speaker: 'AGENT' as const, utterance: agentText, timestamp: new Date() };
+
+  const updatedSession = await mutateSession(callId, (s) => {
+    const appliedPush =
+      pushOp === 'reset'
+        ? 0
+        : pushOp === 'increment'
+          ? Math.min(MAX_PUSH_ATTEMPT, s.pushAttempt + 1)
+          : s.pushAttempt;
+    const updates: Partial<CallSession> = {
+      pushAttempt: appliedPush,
+      conversationHistory: [...s.conversationHistory, userTurn, agentTurn],
+      turnCount: s.turnCount + 2,
+    };
+    if (discountAmount > 0 && !s.discountsOffered.includes(discountAmount)) {
+      updates.discountsOffered = [...s.discountsOffered, discountAmount];
+    }
+    return updates;
+  });
+
+  // Authoritative turn numbers from the post-mutation count — NOT the
+  // pre-stream snapshot, which may be stale (opener backfill / concurrent turn)
+  // and would collide. base is the turnCount before this pair was appended.
+  const baseTurnCount = updatedSession.turnCount - 2;
+  const agentTurnPushAttempt = updatedSession.pushAttempt > 0 ? updatedSession.pushAttempt : null;
 
   insertCallTurn(callId, {
-    turnNumber: session.turnCount + 1,
+    turnNumber: baseTurnCount + 1,
     speaker: 'USER',
     utterance,
     responseLatencyMs: userResponseLatencyMs ?? null,
@@ -205,7 +233,7 @@ export async function persistTurnPair(params: {
     .catch((err) => log.error({ err }, 'DB turn insert failed (user)'));
 
   insertCallTurn(callId, {
-    turnNumber: session.turnCount + 2,
+    turnNumber: baseTurnCount + 2,
     speaker: 'AGENT',
     utterance: agentText,
     toolCalled: dispatch?.toolName ?? null,

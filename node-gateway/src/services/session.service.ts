@@ -1,4 +1,5 @@
 import { redis } from '../lib/redis.js';
+import { withKeyLock } from '../lib/key-mutex.js';
 import { ConversationStage } from '../types/session.types.js';
 import type { CallSession, ConversationTurn, SessionCreateInput } from '../types/session.types.js';
 import { AppError, ErrorCodes } from '../utils/errors.js';
@@ -74,7 +75,11 @@ export async function createSession(input: SessionCreateInput): Promise<CallSess
 export async function getSession(callId: string): Promise<CallSession | null> {
   const raw = await redis.get(key(callId));
   if (!raw) return null;
-  await redis.expire(key(callId), SESSION_TTL);
+  // No EXPIRE-on-read: every mutation (createSession/mutateSession) already
+  // rewrites the key with the full TTL, and a live call writes on every turn,
+  // so an active session's TTL is continually refreshed. A read-side slide is
+  // a redundant Redis round-trip on the hot path (getSession runs several
+  // times per turn). Calls are minutes; the 2h TTL won't lapse mid-call.
   return deserialize(raw as string);
 }
 
@@ -86,24 +91,34 @@ export async function getSessionOrThrow(callId: string): Promise<CallSession> {
   return session;
 }
 
+/**
+ * Atomic read-modify-write for a session. The whole GET → apply → SET runs
+ * inside a per-call lock so concurrent turns can't interleave and lose an
+ * update (e.g. one turn's pushAttempt/turnCount increment clobbering another's
+ * — see `lib/key-mutex.ts`). `mutator` is called exactly once with the freshly
+ * read session and returns the fields to merge.
+ */
+export async function mutateSession(
+  callId: string,
+  mutator: (current: CallSession) => Partial<CallSession>,
+): Promise<CallSession> {
+  return withKeyLock(key(callId), async () => {
+    const session = await getSessionOrThrow(callId);
+    const updated: CallSession = { ...session, ...mutator(session), lastUpdatedAt: new Date() };
+    await redis.set(key(callId), serialize(updated), 'EX', SESSION_TTL);
+    return updated;
+  });
+}
+
 export async function updateSession(callId: string, updates: Partial<CallSession>): Promise<CallSession> {
-  // GET-merge-SET is not atomic.
-  // TODO: Use Redis MULTI/EXEC or Lua script for atomicity in multi-instance deployment.
-  const session = await getSessionOrThrow(callId);
-  const updated: CallSession = { ...session, ...updates, lastUpdatedAt: new Date() };
-  await redis.set(key(callId), serialize(updated), 'EX', SESSION_TTL);
-  return updated;
+  return mutateSession(callId, () => updates);
 }
 
 export async function appendTurn(callId: string, turn: ConversationTurn): Promise<void> {
-  const session = await getSessionOrThrow(callId);
-  const updated: CallSession = {
-    ...session,
+  await mutateSession(callId, (session) => ({
     conversationHistory: [...session.conversationHistory, turn],
     turnCount: session.turnCount + 1,
-    lastUpdatedAt: new Date(),
-  };
-  await redis.set(key(callId), serialize(updated), 'EX', SESSION_TTL);
+  }));
 }
 
 export async function getRecentHistory(callId: string, n: number = 4): Promise<ConversationTurn[]> {
