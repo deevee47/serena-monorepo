@@ -18,12 +18,12 @@ from openai import (
     APIConnectionError,
     APIError,
     APITimeoutError,
-    AsyncOpenAI,
     AuthenticationError,
     RateLimitError,
 )
 
 from app.config.settings import settings
+from app.lib.openai_client import get_openai_client
 from app.services.objection_index import classify_via_pinecone
 from app.utils.errors import ClassificationError
 from app.utils.logger import get_logger
@@ -127,7 +127,7 @@ async def _safe_classify_via_pinecone(utterance: str, call_id: str):
 
 async def _classify_with_llm(utterance: str, call_id: str) -> Classification:
     log = get_logger(call_id)
-    client = AsyncOpenAI(api_key=settings.llm_api_key)
+    client = get_openai_client()
 
     messages: list[dict] = [
         {
