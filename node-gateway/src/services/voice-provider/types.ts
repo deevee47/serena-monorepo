@@ -94,6 +94,21 @@ export type NormalizedVoiceEvent =
       stereoRecordingUrl: string | null;
       recordingId: string | null;
       raw: unknown;
+    }
+  | {
+      /**
+       * Provider speech-boundary signal — the agent stopped speaking or the
+       * user started. Used to measure pre-response latency from real provider
+       * timestamps instead of estimating TTS playback. `atMs` is the provider's
+       * event epoch-ms; null when the provider omits it (the handler then uses
+       * webhook receipt time).
+       */
+      kind: 'speech.boundary';
+      callId: string;
+      role: 'user' | 'assistant';
+      status: 'started' | 'stopped';
+      atMs: number | null;
+      raw: unknown;
     };
 
 /**

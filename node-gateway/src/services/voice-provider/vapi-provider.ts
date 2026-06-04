@@ -152,12 +152,32 @@ export class VapiProvider implements VoiceProvider {
         return out;
       }
 
+      case 'speech-update': {
+        // Real turn-taking timestamps: agent stopped / user started speaking.
+        // These anchor pre-response latency on provider-measured times.
+        if (
+          (msg.role === 'user' || msg.role === 'assistant') &&
+          (msg.status === 'started' || msg.status === 'stopped')
+        ) {
+          return [
+            {
+              kind: 'speech.boundary',
+              callId,
+              role: msg.role,
+              status: msg.status,
+              atMs: typeof msg.timestamp === 'number' ? msg.timestamp : null,
+              raw: msg,
+            },
+          ];
+        }
+        return [];
+      }
+
       // `transcript` events are no-ops under Custom LLM; status-update is
-      // logged elsewhere. Both produce no normalized event.
+      // logged elsewhere. They produce no normalized event.
       case 'transcript':
       case 'status-update':
       case 'hang':
-      case 'speech-update':
       case 'conversation-update':
         return [];
 
@@ -203,4 +223,8 @@ interface VapiMessageShape {
   endedReason?: string;
   recordingUrl?: string | null;
   stereoRecordingUrl?: string | null;
+  // speech-update fields
+  timestamp?: number;
+  status?: string;
+  role?: string;
 }

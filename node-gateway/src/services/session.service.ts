@@ -64,6 +64,8 @@ export async function createSession(input: SessionCreateInput): Promise<CallSess
     followUpRequested: false,
     followUpNote: null,
     lastAgentFinishedAt: null,
+    agentSpeechEndedAtMs: null,
+    pendingResponseLatencyMs: null,
     createdAt: now,
     lastUpdatedAt: now,
     isActive: true,

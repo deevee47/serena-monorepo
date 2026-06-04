@@ -3,7 +3,12 @@ import { config } from '../config/env.js';
 import { createCallLogger, logger } from '../utils/logger.js';
 import { prisma } from '../lib/prisma.js';
 import { redis } from '../lib/redis.js';
-import { ensureSessionForCall, getSession, endSession } from '../services/session.service.js';
+import {
+  ensureSessionForCall,
+  getSession,
+  endSession,
+  mutateSession,
+} from '../services/session.service.js';
 import { callEndQueue, analyticsQueue, crmQueue } from '../queues/index.js';
 import { runIsolated } from '../utils/settle.js';
 import { detectWebhookProvider, getVoiceProvider } from '../services/voice-provider/index.js';
@@ -123,6 +128,36 @@ async function handleCallEnded(
   log.info({ outcome, discountGiven, turnCount: session.turnCount }, 'Call ended');
 }
 
+async function handleSpeechBoundary(
+  event: Extract<NormalizedVoiceEvent, { kind: 'speech.boundary' }>,
+): Promise<void> {
+  // Provider-measured turn-taking → accurate pre-response latency. Use the
+  // provider event time when present, else webhook receipt time.
+  const atMs = event.atMs ?? Date.now();
+  try {
+    if (event.role === 'assistant' && event.status === 'stopped') {
+      // Agent finished speaking — start the clock for the next user reply.
+      await mutateSession(event.callId, () => ({
+        agentSpeechEndedAtMs: atMs,
+        pendingResponseLatencyMs: null,
+      }));
+    } else if (event.role === 'user' && event.status === 'started') {
+      // User began replying — the gap since the agent stopped IS the
+      // think-time. Compute once per gap, then clear the anchor.
+      await mutateSession(event.callId, (s) => {
+        if (s.agentSpeechEndedAtMs == null) return {};
+        return {
+          pendingResponseLatencyMs: Math.max(0, atMs - s.agentSpeechEndedAtMs),
+          agentSpeechEndedAtMs: null,
+        };
+      });
+    }
+  } catch {
+    // Session not created yet (e.g. the agent's opener stops before the first
+    // LLM turn lazily creates the session) — nothing to anchor. Safe to drop.
+  }
+}
+
 async function handleRecordingReady(
   event: Extract<NormalizedVoiceEvent, { kind: 'recording.ready' }>,
 ): Promise<void> {
@@ -239,6 +274,9 @@ export default async function webhookRoutes(app: FastifyInstance) {
               break;
             case 'recording.ready':
               await handleRecordingReady(event);
+              break;
+            case 'speech.boundary':
+              await handleSpeechBoundary(event);
               break;
           }
         } catch (err) {
