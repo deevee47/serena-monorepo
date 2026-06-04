@@ -47,6 +47,7 @@ def _build_inputs(body: ConverseRequest) -> tuple[str, list[dict]]:
         business_name=body.business_name,
         opening_offer_percent=body.opening_offer_percent,
         agent_has_spoken=agent_has_spoken,
+        call_mode=body.call_mode,
     )
     messages = build_chat_messages(
         utterance=body.utterance,

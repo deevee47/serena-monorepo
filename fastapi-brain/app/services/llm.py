@@ -69,6 +69,20 @@ MAX_TOOL_TURNS = 4  # safety cap on observation-loop iterations per user turn
 # then dropped as `observation_tool_leaked_to_gateway`.
 from app.services.tools import OBSERVATION_TOOLS as _OBSERVATION_TOOL_NAMES
 
+# Spoken-confirmation fallbacks for side-effect tools, injected only when the
+# model fired one with zero accompanying text (see converse_response_stream).
+# Hinglish to match the default agent register; the model's own (language-
+# matched) confirmation is preferred and this only fires as a last resort.
+_SIDE_EFFECT_CONFIRMATION: dict[str, str] = {
+    "send_whatsapp_checkout_link": (
+        "Perfect — bhej rahi hoon, checkout link abhi WhatsApp pe aa jayega!"
+    ),
+    "send_whatsapp_product_info": (
+        "Theek hai — saari details main WhatsApp pe bhej deti hoon."
+    ),
+}
+_SIDE_EFFECT_CONFIRMATION_DEFAULT = "Done — main abhi WhatsApp pe bhej rahi hoon."
+
 
 class ConverseTextEvent(TypedDict):
     type: str  # 'text'
@@ -291,6 +305,24 @@ async def converse_response_stream(
                 continue
 
             # No observation calls (or no runner / hit cap) — finish.
+            # Safety net: a side-effect tool (checkout / product-info link)
+            # ENDS the turn, so if the model fired one without speaking, the
+            # customer hears dead air while the link sends. The prompt tells
+            # the model to always co-emit a confirmation line, but models drop
+            # it on terse yes-signals ("yeah okay" -> silent checkout). Inject
+            # a confirmation so the turn is never mute. (Observation tools are
+            # exempt — they loop back and the model speaks on the next pass.)
+            if side_effect_calls and total_text_chunks == 0:
+                fallback = _SIDE_EFFECT_CONFIRMATION.get(
+                    side_effect_calls[0]["name"], _SIDE_EFFECT_CONFIRMATION_DEFAULT
+                )
+                log.warning(
+                    "side_effect_tool_no_text_fallback",
+                    tool=side_effect_calls[0]["name"],
+                )
+                total_text_chunks += 1
+                yield {"type": "text", "delta": fallback}
+
             for c in side_effect_calls:
                 yield {"type": "tool_call", "name": c["name"], "args": c["args"]}
 
