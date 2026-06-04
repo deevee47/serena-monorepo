@@ -3,6 +3,15 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict
 
 
+class CallMode(StrEnum):
+    """Why this call exists. OUTBOUND_RECOVERY = we called them about an
+    abandoned cart (default). INBOUND_PRESALES = they called us, pre-purchase,
+    with product questions/interest. The two reshape the opener + objective."""
+
+    OUTBOUND_RECOVERY = "OUTBOUND_RECOVERY"
+    INBOUND_PRESALES = "INBOUND_PRESALES"
+
+
 class ObjectionType(StrEnum):
     PRICE = "PRICE"
     TRUST = "TRUST"
@@ -178,3 +187,7 @@ class ConverseRequest(BaseModel):
     # The discount the agent can offer up front on the opener as a
     # call-completion incentive. Defaults to 5%; absolute cap remains 10%.
     opening_offer_percent: int = 5
+    # Why this call exists — reshapes the objective + opener. Defaults to
+    # OUTBOUND_RECOVERY so existing callers (and any trigger that omits it)
+    # keep today's abandoned-cart behavior.
+    call_mode: CallMode = CallMode.OUTBOUND_RECOVERY
