@@ -3,6 +3,15 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict
 
 
+class CallMode(StrEnum):
+    """Why this call exists. OUTBOUND_RECOVERY = we called them about an
+    abandoned cart (default). INBOUND_PRESALES = they called us, pre-purchase,
+    with product questions/interest. The two reshape the opener + objective."""
+
+    OUTBOUND_RECOVERY = "OUTBOUND_RECOVERY"
+    INBOUND_PRESALES = "INBOUND_PRESALES"
+
+
 class ObjectionType(StrEnum):
     PRICE = "PRICE"
     TRUST = "TRUST"
@@ -95,6 +104,15 @@ class RecentUserSignals(BaseModel):
     filler_density: float | None = None  # 0.0 – 1.0
     length_trend: float | None = None    # tokens-per-turn slope across recent turns
     repeated_objection: str | None = None  # objection_type repeated on consecutive turns
+    # Explicit 1..5 persistence counter — set by the gateway from session
+    # state so the prompt knows exactly which attempt the LLM is on instead of
+    # inferring it from the transcript. Resets on FAST_TRACK confirmation or
+    # a positive sentiment swing.
+    push_attempt: int | None = None
+    # Pre-response latency on the immediately prior USER turn, in ms. Very low
+    # (<500) = visceral; high (>5000) = distracted/considering. Sourced from
+    # provider webhook timestamps.
+    response_latency_ms: int | None = None
 
 
 class CustomerContext(BaseModel):
@@ -169,3 +187,7 @@ class ConverseRequest(BaseModel):
     # The discount the agent can offer up front on the opener as a
     # call-completion incentive. Defaults to 5%; absolute cap remains 10%.
     opening_offer_percent: int = 5
+    # Why this call exists — reshapes the objective + opener. Defaults to
+    # OUTBOUND_RECOVERY so existing callers (and any trigger that omits it)
+    # keep today's abandoned-cart behavior.
+    call_mode: CallMode = CallMode.OUTBOUND_RECOVERY

@@ -27,7 +27,7 @@ interface InitialPayload {
   isActive: boolean;
   session?: {
     callMode?: string;
-    stage?: string;
+    pushAttempt?: number;
     couponsApplied?: string[];
     selectedPlanId?: string;
   } | null;
@@ -46,6 +46,9 @@ interface InitialPayload {
       toolCalled: string | null;
       toolArgs: unknown;
       observationsCalled: unknown;
+      pushAttempt: number | null;
+      responseLatencyMs: number | null;
+      discountOffered: number | null;
       createdAt: string;
     }>;
   };
@@ -58,13 +61,24 @@ type LiveEvent =
       type: 'session_init';
       selectedPlanId: string;
       callMode: 'INBOUND_PRESALES' | 'OUTBOUND_RECOVERY';
-      stage: string;
+      pushAttempt: number;
       couponsApplied: string[];
       ts: string;
     }
-  | { type: 'user_utterance'; utterance: string; ts: string }
+  | {
+      type: 'user_utterance';
+      utterance: string;
+      responseLatencyMs?: number | null;
+      ts: string;
+    }
   | { type: 'text_delta'; delta: string; ts: string }
-  | { type: 'agent_turn'; utterance: string; ts: string }
+  | {
+      type: 'agent_turn';
+      utterance: string;
+      pushAttempt?: number | null;
+      discountOffered?: number | null;
+      ts: string;
+    }
   | { type: 'observation'; name: string; args: Record<string, unknown>; result: unknown; ts: string }
   | { type: 'tool_call'; name: string; args: Record<string, unknown>; ts: string }
   | { type: 'turn_done'; ts: string }
@@ -154,6 +168,9 @@ export function LiveTail({
             observations: Array.isArray(t.observationsCalled)
               ? (t.observationsCalled as Array<{ name: string; args?: Record<string, unknown> }>)
               : undefined,
+            pushAttempt: t.pushAttempt,
+            responseLatencyMs: t.responseLatencyMs,
+            discountOffered: t.discountOffered,
             timestamp: t.createdAt,
           })),
         );
@@ -209,7 +226,7 @@ export function LiveTail({
                   session: {
                     ...(prev.session ?? {}),
                     callMode: event.callMode,
-                    stage: event.stage,
+                    pushAttempt: event.pushAttempt,
                     selectedPlanId: event.selectedPlanId,
                   },
                 }
@@ -234,6 +251,7 @@ export function LiveTail({
               sentiment: null,
               toolCalled: null,
               toolArgs: null,
+              responseLatencyMs: event.responseLatencyMs ?? null,
             },
           ]);
           break;
@@ -259,6 +277,8 @@ export function LiveTail({
               toolCalled: null,
               toolArgs: null,
               observations: observationsForTurn,
+              pushAttempt: event.pushAttempt ?? null,
+              discountOffered: event.discountOffered ?? null,
             },
           ]);
           break;
@@ -433,8 +453,13 @@ export function LiveTail({
             </dd>
             <dt className="text-muted-foreground">Mode</dt>
             <dd>{initial?.session?.callMode ?? '—'}</dd>
-            <dt className="text-muted-foreground">Stage</dt>
-            <dd>{initial?.session?.stage ?? '—'}</dd>
+            <dt className="text-muted-foreground">Push attempt</dt>
+            <dd className="tabular-nums">
+              {typeof initial?.session?.pushAttempt === 'number' &&
+              initial.session.pushAttempt > 0
+                ? `${initial.session.pushAttempt} / 5`
+                : '—'}
+            </dd>
             <dt className="text-muted-foreground">Coupon</dt>
             <dd>
               {initial?.persisted.couponApplied ?? initial?.session?.couponsApplied?.[0] ?? '—'}

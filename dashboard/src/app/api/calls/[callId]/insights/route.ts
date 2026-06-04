@@ -7,16 +7,24 @@ export const dynamic = 'force-dynamic';
 
 const BRAIN_URL = process.env.FASTAPI_BRAIN_URL ?? 'http://localhost:8000';
 
-// Fire-and-forget brain call. We don't await — the client polls this same
-// endpoint until status flips to READY.
-function triggerGeneration(callId: string) {
+/** How long a `PENDING` insight row can sit before we treat it as stuck.
+ *  Real generations finish in 5-15s; anything older than this almost
+ *  always means the brain crashed mid-OpenAI-call (or got SIGTERM'd by a
+ *  dev-server restart) and the row never advanced to READY/FAILED. */
+const PENDING_STALE_MS = 90_000; // 90 seconds
+
+/** Fire-and-forget brain call. We don't await — the client polls this
+ *  same endpoint until status flips to READY. `regenerate=true` skips the
+ *  brain's "existing READY row" early-return, letting us heal stuck
+ *  PENDING rows by re-running the full flow. */
+function triggerGeneration(callId: string, regenerate = false) {
   fetch(`${BRAIN_URL}/insights/generate`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'X-Internal-Secret': process.env.INTERNAL_SERVICE_SECRET ?? '',
     },
-    body: JSON.stringify({ call_id: callId, regenerate: false }),
+    body: JSON.stringify({ call_id: callId, regenerate }),
     cache: 'no-store',
   }).catch(() => undefined);
 }
@@ -40,6 +48,18 @@ export async function GET(
     });
     if (call?.endedAt) triggerGeneration(callId);
     return NextResponse.json({ status: 'MISSING' }, { status: 200 });
+  }
+
+  // Auto-recover stuck PENDING rows. A real PENDING window is 5-15s; if the
+  // row has been PENDING for more than ~90s the previous brain run almost
+  // certainly died (OpenAI timeout, brain restart mid-flight, etc.). Refire
+  // with regenerate=true so the brain runs the full path and writes a
+  // terminal status. The next 4s client poll will pick up the new state.
+  if (insight.status === 'PENDING') {
+    const ageMs = Date.now() - new Date(insight.generatedAt).getTime();
+    if (ageMs > PENDING_STALE_MS) {
+      triggerGeneration(callId, true);
+    }
   }
 
   return NextResponse.json({

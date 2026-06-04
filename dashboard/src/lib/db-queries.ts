@@ -16,6 +16,18 @@ export interface OverviewStats {
    *  with the converted count alongside. */
   topProducts: Array<{ productId: string; count: number; converted: number }>;
   topTools: Array<{ name: string; count: number }>;
+  /**
+   * Per-side-effect-tool conversion. For each tool fired in the last 7d,
+   * the number of *calls* that fired it (a call only counts once per tool)
+   * plus the number of those calls that ended as CONVERTED. The dashboard
+   * surfaces this as `41/58 calls (71%)` to drive prompt tuning.
+   */
+  toolConversion: Array<{
+    name: string;
+    callsWithTool: number;
+    convertedWithTool: number;
+    conversionRate: number; // 0..100
+  }>;
   dailySeries: Array<{ day: string; total: number; converted: number }>;
   hourlyDensity: Array<{ hour: number; count: number }>;
   sentimentMix7d: { positive: number; neutral: number; negative: number };
@@ -28,6 +40,14 @@ export async function loadOverviewStats(): Promise<OverviewStats> {
 
   type DailyRow = { day: Date; total: bigint; converted: bigint };
   type HourRow = { hour: number; n: bigint };
+  // Per-tool conversion rollup. The CTE counts each call once per tool
+  // (so two `send_whatsapp_checkout_link` invocations on the same call
+  // collapse to one), then joins to the call outcome for the rate.
+  type ToolRoiRow = {
+    tool_called: string;
+    calls_with_tool: bigint;
+    converted_with_tool: bigint;
+  };
 
   const [
     callsToday,
@@ -40,6 +60,7 @@ export async function loadOverviewStats(): Promise<OverviewStats> {
     durationRows,
     products,
     tools,
+    toolRoiRows,
     sentimentRows,
     dailyRowsRaw,
     hourRowsRaw,
@@ -94,6 +115,22 @@ export async function loadOverviewStats(): Promise<OverviewStats> {
       orderBy: { _count: { toolCalled: 'desc' } },
       take: 5,
     }),
+    prisma.$queryRaw<ToolRoiRow[]>`
+      WITH per_call_tool AS (
+        SELECT DISTINCT t.call_id, t.tool_called
+        FROM call_turns t
+        WHERE t.tool_called IS NOT NULL
+          AND t.created_at >= ${sevenDaysAgo}
+      )
+      SELECT
+        pct.tool_called,
+        COUNT(DISTINCT pct.call_id)::bigint AS calls_with_tool,
+        SUM(CASE WHEN c.outcome = 'CONVERTED' THEN 1 ELSE 0 END)::bigint AS converted_with_tool
+      FROM per_call_tool pct
+      JOIN calls c ON c.call_id = pct.call_id
+      GROUP BY pct.tool_called
+      ORDER BY calls_with_tool DESC
+    `,
     prisma.callTurn.groupBy({
       by: ['sentiment'],
       where: {
@@ -209,6 +246,22 @@ export async function loadOverviewStats(): Promise<OverviewStats> {
         name: t.toolCalled as string,
         count: t._count.toolCalled,
       })),
+    toolConversion: toolRoiRows
+      .map((r) => {
+        const callsWithTool = Number(r.calls_with_tool);
+        const convertedWithTool = Number(r.converted_with_tool);
+        const conversionRate =
+          callsWithTool > 0
+            ? Math.round((convertedWithTool / callsWithTool) * 100)
+            : 0;
+        return {
+          name: r.tool_called,
+          callsWithTool,
+          convertedWithTool,
+          conversionRate,
+        };
+      })
+      .sort((a, b) => b.conversionRate - a.conversionRate || b.callsWithTool - a.callsWithTool),
     dailySeries: days,
     hourlyDensity: hours,
     sentimentMix7d,
@@ -229,6 +282,10 @@ export interface CallListItem {
    *  offered one. */
   discountGiven: number;
   turnCount: number;
+  /** Voice platform the gateway used for this call — `'vapi'`, `'telnyx'`,
+   *  or `null` for rows from before the column existed. Surfaced as a
+   *  PlatformBadge in the calls table. */
+  voiceProvider: string | null;
 }
 
 export interface CallListFilters {
@@ -280,6 +337,7 @@ export async function loadCallList(filters: CallListFilters = {}): Promise<CallL
     customerName: r.customer?.name ?? null,
     discountGiven: r.discountGiven,
     turnCount: r._count.turns,
+    voiceProvider: r.voiceProvider,
   }));
 }
 

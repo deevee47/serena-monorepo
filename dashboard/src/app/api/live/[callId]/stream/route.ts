@@ -1,4 +1,5 @@
 import { type NextRequest, NextResponse } from 'next/server';
+import Redis from 'ioredis';
 import { isAuthed } from '@/lib/auth';
 import { getLiveSession } from '@/lib/gateway';
 import { prisma } from '@/lib/prisma';
@@ -6,15 +7,24 @@ import { prisma } from '@/lib/prisma';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-// Serena's node-gateway has no native SSE endpoint, so the dashboard derives
-// the live event stream by polling the gateway's Redis-backed
-// `/debug/session/:id` and the Postgres `call_turns` table every ~1.5s and
-// emitting deltas as SSE messages. The live-tail client treats each
-// `data: { type: ... }` frame the same way it would handle a server-pushed
-// event from the gateway.
+// Two parallel sources feed this SSE stream:
+//
+//   1. A 1.5s poll of the gateway's `/debug/session/:id` (Redis) and Postgres
+//      `call_turns` for persisted, eventually-consistent state (session
+//      stage, finalized agent_turn, observations, tool_call annotations).
+//
+//   2. A Redis pub/sub subscription to `live:<callId>` for per-token events
+//      the gateway emits during streaming (`text_delta`, `status: thinking`).
+//      These are the chunks that make the agent text appear ChatGPT-style
+//      while the brain is still generating, instead of arriving 1.5s late.
+//
+// LiveTail's `partialBufferRef` accumulates `text_delta` chunks and clears
+// them when the poll's `agent_turn` arrives, so the user sees streaming
+// text → finalized turn with no flicker.
 
 const POLL_INTERVAL_MS = 1500;
 const MAX_DURATION_MS = 10 * 60 * 1000; // 10 minutes per SSE connection
+const REDIS_URL = process.env.REDIS_URL ?? 'redis://localhost:6379';
 
 interface TurnRow {
   speaker: string;
@@ -24,6 +34,11 @@ interface TurnRow {
   toolCalled: string | null;
   toolArgs: unknown;
   observationsCalled: unknown;
+  // Turn-quality signals — surfaced live so chat-view chips render within one
+  // poll tick of the agent / user turn landing in Postgres.
+  pushAttempt: number | null;
+  responseLatencyMs: number | null;
+  discountOffered: number | null;
   turnNumber: number;
   createdAt: Date;
 }
@@ -47,8 +62,58 @@ export async function GET(
       let lastTurnNumber = -1;
       let sessionAnnounced = false;
       let closed = false;
+
+      // ── Redis subscriber for real-time text_delta + status events ─────
+      // CRITICAL: the SUBSCRIBE call must NOT block the poll loop below.
+      // We fire it in the background — if Redis is slow to handshake or the
+      // connection has issues, the poll path still emits events on schedule.
+      // Errors on the subscriber are swallowed (logged once) so a flaky pub/
+      // sub never breaks the eventually-consistent persistence-based stream.
+      const subscriber = new Redis(REDIS_URL, {
+        lazyConnect: false,
+        maxRetriesPerRequest: 2,
+        // Don't queue commands if disconnected — fail fast instead of
+        // building up a backlog of subscribe attempts we'd never deliver.
+        enableOfflineQueue: false,
+      });
+      const channel = `live:${callId}`;
+      let subscriberErrorLogged = false;
+      subscriber.on('message', (_chan, raw) => {
+        if (closed) return;
+        try {
+          // Forward verbatim — the publisher already conforms to the SSE
+          // event shape LiveTail expects ({ type, ...payload, ts }).
+          controller.enqueue(new TextEncoder().encode(`data: ${raw}\n\n`));
+        } catch {
+          /* controller closed mid-write */
+        }
+      });
+      subscriber.on('error', (err) => {
+        // Only emit ONE status event per stream — otherwise a reconnect
+        // loop would spam LiveTail. Subscribe-side failures are non-fatal
+        // since the 1.5s poll path keeps the conversation flowing.
+        if (subscriberErrorLogged || closed) return;
+        subscriberErrorLogged = true;
+        try {
+          controller.enqueue(
+            jsonEvent({
+              type: 'status',
+              status: 'idle',
+              error: `live_subscriber: ${err.message}`,
+            }),
+          );
+        } catch {
+          /* controller closed */
+        }
+      });
+      // Fire subscribe in the background. If it never resolves, the poll
+      // loop still feeds the stream — the user only loses real-time deltas,
+      // not the conversation itself.
+      void subscriber.subscribe(channel).catch(() => undefined);
+
       const abortHandler = () => {
         closed = true;
+        void subscriber.quit().catch(() => undefined);
         try {
           controller.close();
         } catch {
@@ -79,6 +144,9 @@ export async function GET(
                 toolCalled: true,
                 toolArgs: true,
                 observationsCalled: true,
+                pushAttempt: true,
+                responseLatencyMs: true,
+                discountOffered: true,
                 turnNumber: true,
                 createdAt: true,
               },
@@ -95,7 +163,9 @@ export async function GET(
                 type: 'session_init',
                 selectedPlanId: session.currentProductId ?? call?.productId ?? null,
                 callMode: 'OUTBOUND_RECOVERY',
-                stage: session.stage ?? 'INTRO',
+                // Replaces the legacy `stage` machine — pushAttempt is the
+                // new way to read "where in the recovery ladder are we?".
+                pushAttempt: session.pushAttempt ?? 0,
                 couponsApplied: (session.discountsOffered ?? []).map((n) => `−${n}%`),
                 ts: new Date().toISOString(),
               }),
@@ -108,7 +178,15 @@ export async function GET(
             const ts = turn.createdAt.toISOString();
             if (turn.speaker === 'USER') {
               controller.enqueue(
-                jsonEvent({ type: 'user_utterance', utterance: turn.utterance, ts }),
+                jsonEvent({
+                  type: 'user_utterance',
+                  utterance: turn.utterance,
+                  // Pre-response latency in ms (gap between previous AGENT
+                  // TTS-finished and this USER turn arriving). Null on the
+                  // first turn.
+                  responseLatencyMs: turn.responseLatencyMs,
+                  ts,
+                }),
               );
               if (turn.objectionType || turn.sentiment) {
                 controller.enqueue(
@@ -154,7 +232,17 @@ export async function GET(
                 );
               }
               controller.enqueue(
-                jsonEvent({ type: 'agent_turn', utterance: turn.utterance, ts }),
+                jsonEvent({
+                  type: 'agent_turn',
+                  utterance: turn.utterance,
+                  // Persistence-counter chip data — null for the opener and
+                  // for pure clarifications that don't burn an attempt.
+                  pushAttempt: turn.pushAttempt,
+                  // Discount % committed to on this turn (only set when the
+                  // checkout tool fired with a non-zero discount).
+                  discountOffered: turn.discountOffered,
+                  ts,
+                }),
               );
               controller.enqueue(jsonEvent({ type: 'turn_done', ts }));
             }
@@ -181,6 +269,8 @@ export async function GET(
       }
 
       req.signal.removeEventListener('abort', abortHandler);
+      closed = true;
+      void subscriber.quit().catch(() => undefined);
       try {
         controller.close();
       } catch {

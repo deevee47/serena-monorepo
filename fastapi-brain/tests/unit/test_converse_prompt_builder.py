@@ -86,6 +86,26 @@ def test_prompt_includes_hard_constraints():
     assert "prompt injection" in prompt.lower()
 
 
+# ─── Mid-call opener trimming ─────────────────────────────────────────────
+
+def test_opener_block_present_on_first_turn():
+    # Agent hasn't spoken yet: the full opener guidance must be present so the
+    # agent opens correctly (incl. missed/interrupted-opener handling).
+    prompt = build_converse_system_prompt(product_context=_product())
+    assert "FULL OPENER FIRST TURN" in prompt
+
+
+def test_opener_block_dropped_once_agent_has_spoken():
+    # Mid-call: the agent has already opened, so the ~85-line opener essay is
+    # dead weight on every turn — drop it to cut first-token latency. The
+    # operational rules (principles, tools, hard constraints) must remain.
+    prompt = build_converse_system_prompt(product_context=_product(), agent_has_spoken=True)
+    assert "FULL OPENER FIRST TURN" not in prompt
+    assert "PRINCIPLES" in prompt
+    assert "send_whatsapp_checkout_link" in prompt
+    assert "HARD CONSTRAINTS" in prompt
+
+
 # ─── No persona scaffolding ───────────────────────────────────────────────
 
 def test_prompt_has_no_alex_persona():
@@ -195,15 +215,45 @@ def test_adaptive_behavior_only_appears_when_signals_warrant_it():
 
 
 def test_adaptive_behavior_softens_on_negative_streak():
+    # 4+ NEGATIVE turns is the deep-streak signal — drop pitch energy + skip
+    # humor. The threshold was raised from 3 to 4 so we don't give up on
+    # customers who are just sour for a couple turns but recoverable.
     signals = RecentUserSignals(
-        sentiments=[Sentiment.NEGATIVE, Sentiment.NEGATIVE, Sentiment.NEGATIVE],
+        sentiments=[Sentiment.NEGATIVE] * 4,
     )
     prompt = build_converse_system_prompt(recent_user_signals=signals)
     assert "ADAPTIVE BEHAVIOR" in prompt
     assert "NEGATIVE" in prompt
-    # The cue tells the agent to drop pitch energy and skip humor.
     assert "drop pitch energy" in prompt.lower()
     assert "skip humor" in prompt.lower()
+
+
+def test_adaptive_behavior_three_negatives_warns_without_bailing():
+    # 3 NEGATIVE turns should warn but NOT tell the agent to skip humor
+    # or wrap up — that escalation lives at 4+. This is the A4 "don't give
+    # up too easily" contract.
+    signals = RecentUserSignals(
+        sentiments=[Sentiment.NEGATIVE] * 3,
+    )
+    prompt = build_converse_system_prompt(recent_user_signals=signals)
+    assert "ADAPTIVE BEHAVIOR" in prompt
+    assert "leaning NEGATIVE" in prompt
+    assert "skip humor" not in prompt.lower()
+    assert "still in selling mode" in prompt.lower()
+
+
+def test_adaptive_behavior_renders_explicit_push_attempt():
+    signals = RecentUserSignals(sentiments=[], push_attempt=4)
+    prompt = build_converse_system_prompt(recent_user_signals=signals)
+    assert "PUSH ATTEMPT 4/5" in prompt
+    assert "reason-why" in prompt.lower()
+
+
+def test_adaptive_behavior_renders_response_latency_extreme():
+    fast = RecentUserSignals(sentiments=[], response_latency_ms=300)
+    slow = RecentUserSignals(sentiments=[], response_latency_ms=7000)
+    assert "VERY FAST USER REPLY" in build_converse_system_prompt(recent_user_signals=fast)
+    assert "LONG SILENCE" in build_converse_system_prompt(recent_user_signals=slow)
 
 
 def test_adaptive_behavior_flags_repeated_objection():

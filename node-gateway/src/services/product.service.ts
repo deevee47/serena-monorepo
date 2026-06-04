@@ -4,6 +4,7 @@
 
 import { findProductAlternatives } from './brain.service.js';
 import { prisma } from '../lib/prisma.js';
+import { createAsyncMemo } from '../lib/async-memo.js';
 import { logger } from '../utils/logger.js';
 
 export interface Product {
@@ -45,6 +46,9 @@ export async function loadCatalog(): Promise<void> {
     });
   }
   catalog = next;
+  // Alternatives are derived from the catalog — drop the memo so a re-seed
+  // doesn't serve stale alternatives.
+  alternativesMemo.clear();
   logger.info({ product_count: catalog.size }, 'Product catalog loaded from DB');
 }
 
@@ -56,6 +60,12 @@ export function getCatalogSize(): number {
   return catalog.size;
 }
 
+// Alternatives depend only on the static catalog, but the lookup is a brain →
+// Pinecone round-trip that `llm.ts` awaits before the first spoken token on
+// every turn. Memoize by (productId, reason) so it's paid once per product for
+// the process lifetime instead of once per turn. Cleared on catalog reload.
+const alternativesMemo = createAsyncMemo<ProductContext>();
+
 export async function findAlternativeProduct(
   currentProductId: string,
   reason: 'PRICE' | 'FEATURE' | 'CATEGORY' | 'PREMIUM',
@@ -63,6 +73,16 @@ export async function findAlternativeProduct(
   const current = getProductById(currentProductId);
   if (!current) return null;
 
+  return alternativesMemo.get(`${currentProductId}:${reason}`, () =>
+    computeAlternativeProduct(current, currentProductId, reason),
+  );
+}
+
+async function computeAlternativeProduct(
+  current: Product,
+  currentProductId: string,
+  reason: 'PRICE' | 'FEATURE' | 'CATEGORY' | 'PREMIUM',
+): Promise<ProductContext | null> {
   let query: string;
   let currentPrice: number | undefined;
   let direction: 'cheaper' | 'premium' = 'cheaper';

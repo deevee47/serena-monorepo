@@ -24,6 +24,7 @@ export async function GET(_req: NextRequest) {
         callId: true,
         createdAt: true,
         phoneNumber: true,
+        voiceProvider: true,
         customer: { select: { name: true } },
       },
     }),
@@ -36,6 +37,7 @@ export async function GET(_req: NextRequest) {
           createdAt: mostRecent.createdAt,
           customerName: mostRecent.customer?.name ?? null,
           phoneNumber: mostRecent.phoneNumber,
+          voiceProvider: mostRecent.voiceProvider,
         }
       : null,
   });

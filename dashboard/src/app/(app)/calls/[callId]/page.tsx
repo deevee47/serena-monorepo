@@ -8,6 +8,7 @@ import { CallScrubber } from '@/components/call-scrubber';
 import { ConversationTabs } from '@/components/conversation-tabs';
 import { DownloadRecordingButton } from '@/components/download-recording-button';
 import { PageHeader } from '@/components/page-header';
+import { PlatformBadge } from '@/components/platform-badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ToolTimeline, buildToolTimeline } from '@/components/tool-timeline';
 import type { ServiceConcern } from '@/components/insight-concerns-card';
@@ -22,7 +23,19 @@ export default async function CallDetailPage({
 }: {
   params: Promise<{ callId: string }>;
 }) {
-  const { callId } = await params;
+  const { callId: raw } = await params;
+  // Telnyx Call Control IDs (`v3:...`) contain a colon, which is a reserved
+  // char in URL path segments. Decode defensively so the DB lookup matches
+  // whether the link came from <Link> (encoded), a direct paste (raw), or
+  // an external referrer. decodeURIComponent is a no-op on already-decoded
+  // strings, so it's safe to apply unconditionally.
+  const callId = (() => {
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw;
+    }
+  })();
   const call = await loadCallDetail(callId);
   if (!call) notFound();
 
@@ -52,6 +65,11 @@ export default async function CallDetailPage({
     })),
   );
 
+  // Offset from call.createdAt — used by ChatView / Transcript rows to seek
+  // the recording on click. Stored as seconds (float, the audio element's
+  // currentTime native unit). Recordings start a few ticks before the first
+  // user turn, so a small negative offset can occur — clamp to 0.
+  const callStartMs = new Date(call.createdAt).getTime();
   const conversationTurns = call.turns.map((t) => ({
     turnNumber: t.turnNumber,
     speaker: t.speaker as 'USER' | 'AGENT',
@@ -67,8 +85,19 @@ export default async function CallDetailPage({
     observations: Array.isArray(t.observationsCalled)
       ? (t.observationsCalled as Array<{ name: string; args?: Record<string, unknown> }>)
       : undefined,
+    pushAttempt: t.pushAttempt,
+    responseLatencyMs: t.responseLatencyMs,
+    discountOffered: t.discountOffered,
     timestamp: t.createdAt,
+    offsetSec: Math.max(0, (new Date(t.createdAt).getTime() - callStartMs) / 1000),
   }));
+
+  // Discount escalation in chronological order. Each AGENT turn that fired
+  // the checkout tool with a non-zero discount becomes a rung. Surfaced in
+  // the KPI strip as `5% → 10%` so operators can see the ladder burn.
+  const discountLadder = call.turns
+    .filter((t) => t.speaker === 'AGENT' && (t.discountOffered ?? 0) > 0)
+    .map((t) => t.discountOffered as number);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -81,7 +110,8 @@ export default async function CallDetailPage({
           { label: `${callId.slice(0, 8)}…` },
         ]}
         action={
-          <div className="flex gap-2">
+          <div className="flex items-center gap-2">
+            <PlatformBadge provider={call.voiceProvider} />
             <Button asChild variant="ghost">
               <Link href="/calls">
                 <CaretLeft className="size-4" />
@@ -90,7 +120,7 @@ export default async function CallDetailPage({
             </Button>
             {inFlight ? (
               <Button asChild variant="ff">
-                <Link href={`/live/${callId}`}>
+                <Link href={`/live/${encodeURIComponent(callId)}`}>
                   <Broadcast className="size-4" />
                   Tail live
                 </Link>
@@ -121,7 +151,7 @@ export default async function CallDetailPage({
             outcome={call.outcome}
             durationSeconds={call.durationSeconds}
             planId={call.productId}
-            coupon={call.discountGiven > 0 ? `−${call.discountGiven}%` : null}
+            discountLadder={discountLadder}
             sentiment={sentimentCounts}
           />
 
@@ -204,11 +234,16 @@ export default async function CallDetailPage({
         </aside>
 
         <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
+          {/* The scrubber doubles as the audio player when the call has
+              ended (`callId` toggles audio integration on). For in-flight
+              calls we omit `callId` so it stays a passive timeline — the
+              recording doesn't exist yet. */}
           <CallScrubber
             callStartedAt={call.createdAt}
             callEndedAt={call.endedAt}
             durationSeconds={call.durationSeconds}
             outcome={call.outcome}
+            callId={inFlight ? undefined : callId}
             turns={conversationTurns.map((t) => ({
               turnNumber: t.turnNumber!,
               speaker: t.speaker,

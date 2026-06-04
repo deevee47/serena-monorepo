@@ -13,9 +13,7 @@ export const redisConnection = {
 export type CallEndJobData = {
   callId: string;
   outcome: 'CONVERTED' | 'DROPPED' | 'NO_ANSWER' | 'ERROR';
-  finalScore: number;
   discountGiven: number;
-  stageReached: string;
   turnCount: number;
   phoneNumber: string;
   productId: string;
@@ -25,9 +23,7 @@ export type CallEndJobData = {
 export type AnalyticsJobData = {
   callId: string;
   outcome: string;
-  finalScore: number;
   discountGiven: number;
-  stageReached: string;
   turnCount: number;
 };
 
@@ -50,6 +46,15 @@ export type ClassifyAnalyticsJobData = {
   utterance: string;
   stage: string;
   score: number;
+};
+
+// Post-call insight generation. Enqueued from callEndWorker after the call
+// row has its endedAt + outcome stamped, so the brain has a stable snapshot
+// to summarize. Worker just POSTs to brain `/insights/generate`; the brain
+// owns the OpenAI call + DB write. BullMQ retries handle transient OpenAI
+// failures so the dashboard isn't the only retry surface anymore.
+export type InsightsJobData = {
+  callId: string;
 };
 
 const defaultJobOptions = {
@@ -76,3 +81,10 @@ export const classifyAnalyticsQueue = new Queue<ClassifyAnalyticsJobData>(
   'classify-analytics-queue',
   { connection: redisConnection, defaultJobOptions },
 );
+
+export const insightsQueue = new Queue<InsightsJobData>('insights-queue', {
+  connection: redisConnection,
+  // OpenAI calls can take 5-15s; bump the per-attempt timeout headroom
+  // and give it 3 attempts with exponential backoff (2s, 4s, 8s).
+  defaultJobOptions,
+});

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable
@@ -7,12 +8,12 @@ from openai import (
     APIConnectionError,
     APIError,
     APITimeoutError,
-    AsyncOpenAI,
     AuthenticationError,
     RateLimitError,
 )
 
 from app.config.settings import settings
+from app.lib.openai_client import get_openai_client
 from app.utils.errors import LLMError
 from app.utils.logger import get_logger
 
@@ -68,6 +69,20 @@ MAX_TOOL_TURNS = 4  # safety cap on observation-loop iterations per user turn
 # then dropped as `observation_tool_leaked_to_gateway`.
 from app.services.tools import OBSERVATION_TOOLS as _OBSERVATION_TOOL_NAMES
 
+# Spoken-confirmation fallbacks for side-effect tools, injected only when the
+# model fired one with zero accompanying text (see converse_response_stream).
+# Hinglish to match the default agent register; the model's own (language-
+# matched) confirmation is preferred and this only fires as a last resort.
+_SIDE_EFFECT_CONFIRMATION: dict[str, str] = {
+    "send_whatsapp_checkout_link": (
+        "Perfect — bhej rahi hoon, checkout link abhi WhatsApp pe aa jayega!"
+    ),
+    "send_whatsapp_product_info": (
+        "Theek hai — saari details main WhatsApp pe bhej deti hoon."
+    ),
+}
+_SIDE_EFFECT_CONFIRMATION_DEFAULT = "Done — main abhi WhatsApp pe bhej rahi hoon."
+
 
 class ConverseTextEvent(TypedDict):
     type: str  # 'text'
@@ -117,23 +132,6 @@ ConverseEvent = (
 ObservationToolRunner = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
-async def _stream_one_pass(
-    client: AsyncOpenAI,
-    full_messages: list[dict],
-    tools: list[dict],
-    log,
-) -> tuple[str, list[dict], str | None]:
-    """Run one OpenAI chat completion stream pass. Yields nothing — collects
-    text deltas internally — but the caller wraps this with another generator
-    that yields events. Returns (text, tool_calls_list, finish_reason).
-
-    tool_calls_list shape (mirrors OpenAI assistant message tool_calls field):
-        [{"id": "call_xxx", "type": "function",
-          "function": {"name": "...", "arguments": "json string"}}, ...]
-    """
-    raise NotImplementedError("inlined into converse_response_stream below")
-
-
 async def converse_response_stream(
     system_prompt: str,
     messages: list[dict],
@@ -151,7 +149,7 @@ async def converse_response_stream(
     text + any side-effect tool_call.
     """
     log = get_logger(call_id)
-    client = AsyncOpenAI(api_key=settings.llm_api_key)
+    client = get_openai_client()
     start = time.perf_counter()
 
     # Mutable working copy — observation loop appends assistant + tool messages.
@@ -256,19 +254,29 @@ async def converse_response_stream(
                 })
 
                 # 2) Execute observation tools and append tool result messages.
-                for c in observation_calls:
-                    # Emit a thinking event BEFORE awaiting the DB roundtrip so
-                    # the gateway can fill the dead-air gap with a filler.
-                    yield {"type": "thinking", "tool": c["name"]}
+                #    Emit all thinking events up front (so the gateway can fill
+                #    dead air), then run the DB roundtrips CONCURRENTLY — each
+                #    await is audible latency on a live call, and the tools are
+                #    independent reads. Results are re-associated in call order.
+                async def _run_observation(call: dict[str, Any]) -> dict[str, Any]:
                     try:
-                        result = await run_observation_tool(c["name"], c["args"])
+                        return await run_observation_tool(call["name"], call["args"])
                     except Exception as exc:  # noqa: BLE001
                         log.warning(
                             "observation_tool_error",
-                            tool=c["name"],
+                            tool=call["name"],
                             error=str(exc),
                         )
-                        result = {"error": "tool_execution_failed", "message": str(exc)}
+                        return {"error": "tool_execution_failed", "message": str(exc)}
+
+                for c in observation_calls:
+                    yield {"type": "thinking", "tool": c["name"]}
+
+                results = await asyncio.gather(
+                    *(_run_observation(c) for c in observation_calls)
+                )
+
+                for c, result in zip(observation_calls, results):
                     total_observations += 1
                     yield {
                         "type": "observation",
@@ -297,6 +305,24 @@ async def converse_response_stream(
                 continue
 
             # No observation calls (or no runner / hit cap) — finish.
+            # Safety net: a side-effect tool (checkout / product-info link)
+            # ENDS the turn, so if the model fired one without speaking, the
+            # customer hears dead air while the link sends. The prompt tells
+            # the model to always co-emit a confirmation line, but models drop
+            # it on terse yes-signals ("yeah okay" -> silent checkout). Inject
+            # a confirmation so the turn is never mute. (Observation tools are
+            # exempt — they loop back and the model speaks on the next pass.)
+            if side_effect_calls and total_text_chunks == 0:
+                fallback = _SIDE_EFFECT_CONFIRMATION.get(
+                    side_effect_calls[0]["name"], _SIDE_EFFECT_CONFIRMATION_DEFAULT
+                )
+                log.warning(
+                    "side_effect_tool_no_text_fallback",
+                    tool=side_effect_calls[0]["name"],
+                )
+                total_text_chunks += 1
+                yield {"type": "text", "delta": fallback}
+
             for c in side_effect_calls:
                 yield {"type": "tool_call", "name": c["name"], "args": c["args"]}
 
