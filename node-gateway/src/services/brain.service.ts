@@ -100,6 +100,14 @@ export type ConverseRequest = {
   customer_context?: CustomerContextPayload | null;
   recent_user_signals?: RecentUserSignalsPayload | null;
   discounts_already_offered?: number[];
+  // Call-completion offer the agent leads with in the opener. Sourced from the
+  // trigger's discount_pct (X-Discount-Pct header → Telnyx dynamic var →
+  // extra_metadata). Omitted → brain defaults to 5%. Absolute cap stays 10%.
+  opening_offer_percent?: number;
+  // Why the call exists — reshapes the brain's objective + opener. From the
+  // trigger's call_mode (X-Call-Mode → dynamic var → extra_metadata). Omitted
+  // → brain defaults to OUTBOUND_RECOVERY (today's abandoned-cart behavior).
+  call_mode?: 'INBOUND_PRESALES' | 'OUTBOUND_RECOVERY';
 };
 
 export type ConverseResponse = {

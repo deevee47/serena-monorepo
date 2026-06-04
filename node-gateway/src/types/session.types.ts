@@ -50,11 +50,21 @@ export interface CallSession {
   followUpRequested: boolean;
   followUpNote: string | null;
   /**
-   * TTS-finished timestamp for the most recent AGENT turn — used to compute
-   * `responseLatencyMs` for the next USER turn (gap between agent stopping
-   * and user starting to speak). null on the very first turn.
+   * Estimated TTS-finished timestamp for the most recent AGENT turn — the
+   * FALLBACK latency anchor when the provider doesn't deliver speech-boundary
+   * events. null on the very first turn.
    */
   lastAgentFinishedAt: string | null;
+  /**
+   * Provider-measured turn-taking, set from `speech.boundary` webhooks:
+   *  - `agentSpeechEndedAtMs`: epoch-ms the agent actually stopped speaking
+   *    (set on assistant-stopped; consumed by the next user-started).
+   *  - `pendingResponseLatencyMs`: accurate think-time (user-started −
+   *    agent-stopped) awaiting attachment to the next USER turn. Preferred over
+   *    the estimate; cleared once consumed.
+   */
+  agentSpeechEndedAtMs: number | null;
+  pendingResponseLatencyMs: number | null;
   createdAt: Date;
   lastUpdatedAt: Date;
   isActive: boolean;

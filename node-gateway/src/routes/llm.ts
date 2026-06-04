@@ -31,6 +31,7 @@ import {
 } from '../services/brain.service.js';
 import { dispatchToolCall } from '../services/converse-dispatcher.js';
 import { checkSpokenDiscount } from '../services/discount-guard.js';
+import { estimateSpeechMs } from '../lib/tts-estimate.js';
 import {
   findAlternativeProduct,
   getProductById,
@@ -220,6 +221,26 @@ async function llmCompletionsHandler(request: FastifyRequest, reply: FastifyRepl
     typeof env.metadata['product_id'] === 'string'
       ? (env.metadata['product_id'] as string)
       : null;
+  // Call-completion offer from the trigger (X-Discount-Pct → dynamic var →
+  // extra_metadata). Arrives as a string; clamp to the authorized 0-10 range.
+  // Null when the trigger didn't set one → the brain falls back to its 5%
+  // default. We never let it exceed the 10% absolute cap.
+  const rawDiscount = env.metadata['discount_pct'];
+  const parsedDiscount =
+    typeof rawDiscount === 'string' || typeof rawDiscount === 'number'
+      ? Number(rawDiscount)
+      : NaN;
+  const openingOfferPercent = Number.isFinite(parsedDiscount)
+    ? Math.min(10, Math.max(0, Math.round(parsedDiscount)))
+    : null;
+  // Call mode from the trigger (X-Call-Mode → dynamic var → extra_metadata).
+  // Only the two known modes are forwarded; anything else → null so the brain
+  // falls back to its OUTBOUND_RECOVERY default.
+  const rawCallMode = env.metadata['call_mode'];
+  const callMode =
+    rawCallMode === 'INBOUND_PRESALES' || rawCallMode === 'OUTBOUND_RECOVERY'
+      ? rawCallMode
+      : null;
   const ensured = await ensureSessionForCall({
     callId,
     phoneNumber,
@@ -256,15 +277,33 @@ async function llmCompletionsHandler(request: FastifyRequest, reply: FastifyRepl
       const utterance = lastUserMessage?.content ?? '';
 
       // Pre-response latency = gap between the previous AGENT turn finishing
-      // TTS and this USER turn arriving. We don't have a provider-side
-      // timestamp here on every transport (Vapi exposes it on some events,
-      // Telnyx doesn't expose it consistently in the LLM envelope), so we
-      // measure from our own session.lastAgentFinishedAt. Skip the first
-      // turn (no prior agent reply to anchor against).
+      // TTS and this USER turn arriving. `lastAgentFinishedAt` is the ESTIMATED
+      // TTS-playback-end of the prior turn (generation time + estimated speech
+      // duration — see where it's set below), so this approximates the
+      // customer's actual think-time rather than counting the agent's speech as
+      // silence. Still imperfect: turnReceivedAt is when the user's utterance
+      // POSTs (after they finish speaking), so their own speech duration is
+      // included — but the dominant agent-message-length confound is removed.
+      // Skip the first turn (no prior agent reply to anchor against).
       const turnReceivedAt = Date.now();
-      const currentUserLatencyMs = session.lastAgentFinishedAt
-        ? Math.max(0, turnReceivedAt - new Date(session.lastAgentFinishedAt).getTime())
-        : null;
+      let currentUserLatencyMs: number | null;
+      if (typeof session.pendingResponseLatencyMs === 'number') {
+        // Provider-measured think-time (user-started − agent-stopped, from
+        // speech.boundary webhooks) — the accurate value. Clear it so a later
+        // turn that gets no speech events doesn't reuse a stale number.
+        currentUserLatencyMs = session.pendingResponseLatencyMs;
+        void updateSession(callId, { pendingResponseLatencyMs: null }).catch((err) =>
+          log.warn({ err }, 'clear pendingResponseLatencyMs failed (non-fatal)'),
+        );
+      } else if (session.lastAgentFinishedAt) {
+        // Fallback: estimate from generation-end + estimated TTS playback.
+        currentUserLatencyMs = Math.max(
+          0,
+          turnReceivedAt - new Date(session.lastAgentFinishedAt).getTime(),
+        );
+      } else {
+        currentUserLatencyMs = null;
+      }
 
       // ── Live customer + cart context ───────────────────────────────────
       // Cached per-call on Redis so we hit Postgres once per call, not once
@@ -487,6 +526,10 @@ async function llmCompletionsHandler(request: FastifyRequest, reply: FastifyRepl
             customer_context: loaded.customer,
             recent_user_signals: recentSignals,
             discounts_already_offered: session.discountsOffered,
+            ...(openingOfferPercent !== null
+              ? { opening_offer_percent: openingOfferPercent }
+              : {}),
+            ...(callMode !== null ? { call_mode: callMode } : {}),
           },
           {
             onTextDelta: (delta) => {
@@ -569,13 +612,18 @@ async function llmCompletionsHandler(request: FastifyRequest, reply: FastifyRepl
         return;
       }
 
-      // Record TTS-finished marker for the next turn's latency computation.
-      // (Approximate — true TTS-finished comes from the provider's
-      // tts-ended event, which we don't reliably get on every transport. The
-      // bias is consistent across turns so the relative latency signal
-      // remains useful.)
-      const agentFinishedAt = new Date().toISOString();
-      updateSession(callId, { lastAgentFinishedAt: agentFinishedAt }).catch((err) =>
+      // Anchor for the NEXT turn's pre-response latency. We finished
+      // generating the text now, but the provider's TTS still has to speak it
+      // to the customer — they can't reply until they've heard it. Timing from
+      // "now" would count the whole TTS playback as customer silence, and that
+      // inflation grows with how much the agent said. So advance the anchor by
+      // the estimated speech duration to approximate when the customer finished
+      // hearing the turn. (Heuristic; the exact value would need a provider
+      // speech-end event, which isn't reliably available per turn. A barge-in
+      // lands before this estimate → clamped to 0 by the reader, which reads
+      // correctly as an eager/instant reply.)
+      const agentSpeechEndsAt = new Date(Date.now() + estimateSpeechMs(fullText)).toISOString();
+      updateSession(callId, { lastAgentFinishedAt: agentSpeechEndsAt }).catch((err) =>
         log.warn({ err }, 'lastAgentFinishedAt update failed (non-fatal)'),
       );
 
