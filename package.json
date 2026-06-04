@@ -16,7 +16,8 @@
     "db:migrate:dev": "bunx prisma migrate dev",
     "db:migrate": "bunx prisma migrate deploy",
     "db:studio": "bunx prisma studio",
-    "db:seed": "bun run scripts/seed.ts"
+    "db:seed": "bun run scripts/seed.ts",
+    "gen:types": "cd fastapi-brain && uv run python ../scripts/gen-brain-types.py"
   },
   "devDependencies": {
     "@types/bun": "latest",
@@ -27,6 +28,7 @@
     "typescript": "^5"
   },
   "dependencies": {
-    "@prisma/client": "5"
+    "@prisma/client": "5",
+    "tweetnacl": "^1.0.3"
   }
 }

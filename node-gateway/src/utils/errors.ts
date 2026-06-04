@@ -6,6 +6,7 @@ export const ErrorCodes = {
   INVALID_STAGE_TRANSITION: 'INVALID_STAGE_TRANSITION',
   INVALID_PAYLOAD: 'INVALID_PAYLOAD',
   VAPI_REJECTED: 'VAPI_REJECTED',
+  PROVIDER_REJECTED: 'PROVIDER_REJECTED',
 } as const;
 
 export type ErrorCode = (typeof ErrorCodes)[keyof typeof ErrorCodes];

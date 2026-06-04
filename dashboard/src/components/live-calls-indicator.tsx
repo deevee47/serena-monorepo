@@ -12,6 +12,7 @@ interface LivePayload {
     createdAt: string;
     customerName: string | null;
     phoneNumber: string | null;
+    voiceProvider: string | null;
   } | null;
 }
 
@@ -48,9 +49,18 @@ export function LiveCallsIndicator() {
   }, []);
 
   const active = data.count > 0;
-  const target = data.mostRecent ? `/live/${data.mostRecent.callId}` : '/live';
+  const target = data.mostRecent
+    ? `/live/${encodeURIComponent(data.mostRecent.callId)}`
+    : '/live';
   const callerLabel = data.mostRecent
     ? data.mostRecent.customerName ?? data.mostRecent.phoneNumber ?? 'Anonymous'
+    : null;
+  const platformLabel = data.mostRecent?.voiceProvider
+    ? data.mostRecent.voiceProvider.toLowerCase() === 'telnyx'
+      ? 'Telnyx'
+      : data.mostRecent.voiceProvider.toLowerCase() === 'vapi'
+        ? 'Vapi'
+        : data.mostRecent.voiceProvider
     : null;
 
   const onClick = () => {
@@ -92,6 +102,18 @@ export function LiveCallsIndicator() {
       <span className="font-mono text-[10px] uppercase tracking-[0.22em]">
         {active ? `${data.count} in flight` : 'Idle'}
       </span>
+
+      {/* Platform pill — only when active and the gateway tagged the call.
+          Sits between the count and the caller label so the operator sees at
+          a glance which provider is on the wire. */}
+      {active && platformLabel ? (
+        <>
+          <span aria-hidden className="h-3 w-px bg-border" />
+          <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-foreground/70">
+            {platformLabel}
+          </span>
+        </>
+      ) : null}
 
       {/* Caller hint — only when active and we have a label. Truncates so
           the chip never grows wider than ~280px even with long names. */}

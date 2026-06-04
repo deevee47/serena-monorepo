@@ -72,7 +72,7 @@ export function RecentCallsPanel({ calls, pageSize = 5 }: RecentCallsPanelProps)
                 <TableRow key={call.callId}>
                   <TableCell>
                     <Link
-                      href={`/calls/${call.callId}`}
+                      href={`/calls/${encodeURIComponent(call.callId)}`}
                       className="block text-foreground hover:underline"
                     >
                       {formatRelative(new Date(call.createdAt))}

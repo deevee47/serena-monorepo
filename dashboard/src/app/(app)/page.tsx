@@ -144,6 +144,7 @@ export default async function OverviewPage() {
                 <OverviewTab value="objections">Objections</OverviewTab>
                 <OverviewTab value="products">Products</OverviewTab>
                 <OverviewTab value="tools">Tools</OverviewTab>
+                <OverviewTab value="tool-roi">Tool ROI</OverviewTab>
               </TabsList>
               <TabsContent
                 value="objections"
@@ -185,6 +186,12 @@ export default async function OverviewPage() {
                   }))}
                   emptyHint="No side-effect tools fired in the last 7 days."
                 />
+              </TabsContent>
+              <TabsContent
+                value="tool-roi"
+                className="m-0 min-h-0 flex-1 overflow-y-auto p-3"
+              >
+                <ToolRoiList items={stats.toolConversion} />
               </TabsContent>
             </Tabs>
           </Panel>
@@ -347,6 +354,72 @@ function OverviewTab({
     >
       {children}
     </TabsTrigger>
+  );
+}
+
+/** Per-tool conversion rollup. Each row shows the tool name with a small
+ *  bar visualising its 7-day conversion rate alongside the raw counts —
+ *  `41/58 calls · 71%`. The bar fills against 100% so two side-by-side
+ *  tools can be compared by eye. Empty state explains where the data
+ *  comes from so an empty panel doesn't read like a bug. */
+function ToolRoiList({
+  items,
+}: {
+  items: Array<{
+    name: string;
+    callsWithTool: number;
+    convertedWithTool: number;
+    conversionRate: number;
+  }>;
+}) {
+  if (items.length === 0) {
+    return (
+      <p className="px-1 py-4 text-center text-xs text-muted-foreground">
+        No side-effect tools fired in the last 7 days yet.
+      </p>
+    );
+  }
+  return (
+    <ul className="space-y-3">
+      {items.map((t) => (
+        <li key={t.name} className="space-y-1">
+          <div className="flex items-baseline justify-between gap-2 text-[11px]">
+            <span className="truncate font-mono uppercase tracking-[0.16em] text-foreground/90">
+              {t.name}
+            </span>
+            <span className="shrink-0 font-mono tabular-nums text-muted-foreground">
+              {t.convertedWithTool}/{t.callsWithTool}
+              {' · '}
+              <span
+                className={cn(
+                  'tabular-nums',
+                  t.conversionRate >= 50
+                    ? 'text-emerald-600 dark:text-emerald-500'
+                    : t.conversionRate >= 20
+                      ? 'text-foreground/80'
+                      : 'text-muted-foreground',
+                )}
+              >
+                {t.conversionRate}%
+              </span>
+            </span>
+          </div>
+          <div className="h-1 w-full bg-muted/50">
+            <div
+              className={cn(
+                'h-full',
+                t.conversionRate >= 50
+                  ? 'bg-emerald-500/70'
+                  : t.conversionRate >= 20
+                    ? 'bg-ff-orange/70'
+                    : 'bg-muted-foreground/40',
+              )}
+              style={{ width: `${Math.min(100, t.conversionRate)}%` }}
+            />
+          </div>
+        </li>
+      ))}
+    </ul>
   );
 }
 

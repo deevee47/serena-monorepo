@@ -1,5 +1,6 @@
 import { Wrench } from '@phosphor-icons/react/dist/ssr';
 import { Badge } from '@/components/ui/badge';
+import { SEEK_AUDIO_EVENT, type SeekAudioDetail } from '@/components/call-scrubber';
 import { cn } from '@/lib/utils';
 
 export interface TranscriptTurn {
@@ -19,7 +20,94 @@ export interface TranscriptTurn {
   /** Observation tools the LLM invoked DURING this agent turn (look-ups it ran
    *  before / after speaking the visible utterance). */
   observations?: Array<{ name: string; args?: Record<string, unknown> }>;
+  /** Explicit 1..5 persistence counter on AGENT turns. Surfaced as a chip
+   *  so operators can see how persistent the agent is being at a glance. */
+  pushAttempt?: number | null;
+  /** Pre-response latency on USER turns, ms. Surfaced as a faint sub-chip
+   *  to give the post-mortem reader a sense of how fast/slow the caller
+   *  was reacting to each agent line. */
+  responseLatencyMs?: number | null;
+  /** Discount % the agent committed to on this turn (only present when the
+   *  checkout tool fired with a non-zero discount). Drives the ladder
+   *  rendering in the KPI strip + an inline chip on the bubble. */
+  discountOffered?: number | null;
   timestamp?: string | Date | null;
+  /** Seconds from the start of the call recording, computed on the page
+   *  from (turn.timestamp - call.createdAt). When present, the row becomes
+   *  clickable and seeks `CallRecordingPlayer` to that offset. */
+  offsetSec?: number | null;
+}
+
+/** Inline chip showing how many push-attempts the agent has burned through.
+ *  Color escalates 1-2 = muted, 3 = warning, 4-5 = orange (the "you're almost
+ *  out of legitimate pushes" signal). Renders nothing for null/0. */
+export function PushAttemptChip({ attempt }: { attempt?: number | null }) {
+  if (!attempt || attempt <= 0) return null;
+  const tone =
+    attempt >= 4
+      ? 'border-ff-orange/70 text-ff-orange'
+      : attempt === 3
+        ? 'border-amber-500/60 text-amber-600 dark:text-amber-500'
+        : 'border-border/60 text-muted-foreground';
+  return (
+    <span
+      title={`Persistence: push attempt ${attempt} of 5`}
+      className={cn(
+        'inline-flex items-center gap-1 border bg-transparent px-1.5 py-px font-mono text-[9px] uppercase tracking-[0.18em]',
+        tone,
+      )}
+    >
+      Push {attempt}/5
+    </span>
+  );
+}
+
+/** Inline chip surfacing pre-response latency. Faint by default — just a
+ *  data point. Goes a touch louder at the extremes (<500ms visceral,
+ *  >5000ms distracted) so eye can spot meaningful moments. */
+export function LatencyChip({ ms }: { ms?: number | null }) {
+  if (!ms || ms <= 0) return null;
+  const tone =
+    ms < 500 || ms > 5000
+      ? 'text-foreground/80'
+      : 'text-muted-foreground/70';
+  const label = ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
+  return (
+    <span
+      title="Caller reply latency (TTS-end → user speech start)"
+      className={cn(
+        'inline-flex items-center font-mono text-[9px] tabular-nums uppercase tracking-[0.18em]',
+        tone,
+      )}
+    >
+      ↳ {label}
+    </span>
+  );
+}
+
+/** Inline chip showing the discount the agent committed to on this turn. */
+export function DiscountChip({ pct }: { pct?: number | null }) {
+  if (!pct || pct <= 0) return null;
+  return (
+    <span
+      title={`Discount offered on this turn: ${pct}%`}
+      className="inline-flex items-center bg-ff-orange/10 px-1.5 py-px font-mono text-[9px] uppercase tracking-[0.18em] text-ff-orange"
+    >
+      −{pct}%
+    </span>
+  );
+}
+
+/** Click handler shared by Transcript + ChatView rows. Dispatches the
+ *  seek-audio event the player listens for. Wrapped so behavior stays
+ *  consistent between the two views. */
+function seekAudioTo(offsetSec: number | null | undefined): void {
+  if (typeof offsetSec !== 'number') return;
+  window.dispatchEvent(
+    new CustomEvent<SeekAudioDetail>(SEEK_AUDIO_EVENT, {
+      detail: { offsetSec },
+    }),
+  );
 }
 
 /** Colored dot next to the objection chip — telegraphs caller emotional state
@@ -84,13 +172,30 @@ export function Transcript({ turns, emptyHint, fill = false }: TranscriptProps) 
         fill && 'min-h-0 flex-1 overflow-y-auto',
       )}
     >
-      {visible.map((turn, i) => (
+      {visible.map((turn, i) => {
+        const seekable = typeof turn.offsetSec === 'number';
+        return (
         <li
           key={i}
           data-turn-index={turn.turnNumber ?? undefined}
+          onClick={seekable ? () => seekAudioTo(turn.offsetSec) : undefined}
+          onKeyDown={
+            seekable
+              ? (e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    seekAudioTo(turn.offsetSec);
+                  }
+                }
+              : undefined
+          }
+          role={seekable ? 'button' : undefined}
+          tabIndex={seekable ? 0 : undefined}
+          title={seekable ? 'Click to play this moment in the recording' : undefined}
           className={cn(
             'turn-row flex gap-4 px-6 py-4 transition-colors',
             turn.speaker === 'AGENT' ? 'bg-secondary/30' : '',
+            seekable && 'cursor-pointer hover:bg-secondary/60 focus:outline-none focus:ring-1 focus:ring-ring',
           )}
         >
           <div className="w-16 shrink-0 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
@@ -118,6 +223,9 @@ export function Transcript({ turns, emptyHint, fill = false }: TranscriptProps) 
                   {turn.sentiment.toLowerCase()}
                 </Badge>
               ) : null}
+              {turn.speaker === 'AGENT' ? <PushAttemptChip attempt={turn.pushAttempt} /> : null}
+              {turn.speaker === 'USER' ? <LatencyChip ms={turn.responseLatencyMs} /> : null}
+              <DiscountChip pct={turn.discountOffered} />
               {(turn.observations ?? []).map((obs, idx) => (
                 <Badge key={`${obs.name}-${idx}`} variant="info" className="font-normal">
                   <Wrench className="mr-1 size-3" />
@@ -153,7 +261,8 @@ export function Transcript({ turns, emptyHint, fill = false }: TranscriptProps) 
             </div>
           </div>
         </li>
-      ))}
+        );
+      })}
     </ul>
   );
 }

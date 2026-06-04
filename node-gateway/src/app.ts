@@ -10,7 +10,7 @@ import { BunRedisStore } from './lib/rate-limit-store.js';
 import healthRoutes from './routes/health.js';
 import webhookRoutes from './routes/webhook.js';
 import callsRoutes from './routes/calls.js';
-import vapiLlmRoutes from './routes/vapi-llm.js';
+import llmRoutes from './routes/llm.js';
 import { loadCatalog } from './services/product.service.js';
 
 export async function buildApp() {
@@ -53,7 +53,7 @@ export async function buildApp() {
   await app.register(healthRoutes);
   await app.register(webhookRoutes);
   await app.register(callsRoutes);
-  await app.register(vapiLlmRoutes);
+  await app.register(llmRoutes);
 
   app.setErrorHandler((error, request, reply) => {
     const callId = (request.headers['x-call-id'] as string | undefined) ?? 'unknown';

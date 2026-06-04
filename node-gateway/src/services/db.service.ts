@@ -1,4 +1,5 @@
 import { prisma } from '../lib/prisma.js';
+import { redis } from '../lib/redis.js';
 import type { CallSession } from '../types/session.types.js';
 import type {
   CartContextPayload,
@@ -14,14 +15,24 @@ export interface CallTurnData {
   objectionType?: string | null;
   objectionSubtype?: string | null;
   sentiment?: 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL' | null;
-  scoreBefore: number;
-  scoreAfter: number;
-  stage: string;
   discountOffered?: number | null;
-  // Tool attribution under the converse pipeline. Only set on AGENT turns
-  // when the LLM picked a tool. Null for text-only turns and USER turns.
+  // Side-effect tool attribution. Only set on AGENT turns when the LLM
+  // picked a tool. Null for text-only turns and USER turns.
   toolCalled?: string | null;
   toolArgs?: Record<string, unknown> | null;
+  // Read-only tool invocations (list_products, get_offer, etc.) the brain
+  // ran during this AGENT turn. Stored as JSON array; the SSE route emits
+  // one `observation` event per entry, which the LiveTail folds into the
+  // turn as observation chips.
+  observationsCalled?: Array<{
+    name: string;
+    args: Record<string, unknown>;
+    result: Record<string, unknown>;
+  }> | null;
+  // Turn-quality signals (migration 20260522120000).
+  pushAttempt?: number | null;          // AGENT turns only — 1..5
+  responseLatencyMs?: number | null;    // USER turns only — ms
+  observationLatenciesMs?: Array<{ name: string; ms: number }> | null;
 }
 
 export interface CallTurnAnalyticsUpdate {
@@ -34,17 +45,19 @@ export interface CallEndUpdate {
   endedAt?: Date;
   durationSeconds?: number;
   outcome?: 'CONVERTED' | 'DROPPED' | 'NO_ANSWER' | 'ERROR';
-  finalScore?: number;
   discountGiven?: number;
-  stageReached?: string;
 }
 
-export async function createCallRecord(session: CallSession): Promise<void> {
+export async function createCallRecord(
+  session: CallSession,
+  voiceProvider?: string,
+): Promise<void> {
   await prisma.call.create({
     data: {
       callId: session.callId,
       phoneNumber: session.phoneNumber,
       productId: session.productId,
+      voiceProvider: voiceProvider ?? null,
     },
   });
 }
@@ -76,12 +89,13 @@ export async function insertCallTurn(callId: string, turn: CallTurnData): Promis
       objectionType: turn.objectionType ?? null,
       objectionSubtype: turn.objectionSubtype ?? null,
       sentiment: turn.sentiment ?? null,
-      scoreBefore: turn.scoreBefore,
-      scoreAfter: turn.scoreAfter,
-      stage: turn.stage,
       discountOffered: turn.discountOffered ?? null,
       toolCalled: turn.toolCalled ?? null,
       toolArgs: (turn.toolArgs ?? null) as never,
+      observationsCalled: (turn.observationsCalled ?? null) as never,
+      pushAttempt: turn.pushAttempt ?? null,
+      responseLatencyMs: turn.responseLatencyMs ?? null,
+      observationLatenciesMs: (turn.observationLatenciesMs ?? null) as never,
     },
     select: { id: true },
   });
@@ -129,6 +143,37 @@ export interface LoadedCallContext {
   /** First product in the abandoned cart — used to seed product_context
    *  when the call wasn't triggered with an explicit product_id. */
   primaryProductId: string | null;
+}
+
+const CALL_CONTEXT_TTL_SECONDS = 1800;
+
+/**
+ * Per-call cache of customer + cart context. The underlying loadCallContext
+ * hits Postgres for one customer row, up-to-5 purchases, and the active
+ * abandoned cart — too expensive to repeat on every turn. Cache for the
+ * call's lifetime (30 min TTL covers the longest realistic call).
+ *
+ * Errors are swallowed and a null context is returned: the brain's prompt
+ * builder degrades gracefully when customer/cart are missing.
+ */
+export async function getCachedCallContext(
+  callId: string,
+  phoneNumber: string,
+): Promise<LoadedCallContext> {
+  const ctxKey = `call_ctx:${callId}`;
+  const cached = await redis.get(ctxKey).catch(() => null);
+  if (cached) {
+    try {
+      return JSON.parse(cached as string) as LoadedCallContext;
+    } catch {
+      // Malformed cache entry — fall through and re-load.
+    }
+  }
+  const loaded = await loadCallContext(phoneNumber).catch(
+    () => ({ customer: null, cart: null, primaryProductId: null } as LoadedCallContext),
+  );
+  await redis.setex(ctxKey, CALL_CONTEXT_TTL_SECONDS, JSON.stringify(loaded)).catch(() => {});
+  return loaded;
 }
 
 export async function loadCallContext(phoneNumber: string): Promise<LoadedCallContext> {
@@ -212,7 +257,11 @@ export async function loadCallContext(phoneNumber: string): Promise<LoadedCallCo
 /** Read the last n USER turns and derive a small RecentUserSignals snapshot
  *  the brain can react to. The classifier-analytics worker writes
  *  `sentiment` + `objectionType` async — by turn N+1, turn N-1's tags are
- *  usually in place. Missing values just degrade the signal, never block. */
+ *  usually in place. Missing values just degrade the signal, never block.
+ *
+ *  Also surfaces the most recent USER `responseLatencyMs` (set by the
+ *  gateway from provider webhook timestamps when available) so the prompt
+ *  can fold pre-response latency into its adaptive behavior. */
 export async function getRecentTurnSignals(
   callId: string,
   n: number = 3,
@@ -221,7 +270,12 @@ export async function getRecentTurnSignals(
     where: { callId, speaker: 'USER' },
     orderBy: { turnNumber: 'desc' },
     take: n,
-    select: { utterance: true, sentiment: true, objectionType: true },
+    select: {
+      utterance: true,
+      sentiment: true,
+      objectionType: true,
+      responseLatencyMs: true,
+    },
   });
 
   // Reverse so callers see oldest-first (the natural reading order).
@@ -245,11 +299,19 @@ export async function getRecentTurnSignals(
   const fillerDensity = computeFillerDensity(utterances);
   const lengthTrend = computeUtteranceLengthTrend(utterances);
 
+  // Most recent user latency — the one that just landed, if we measured it.
+  const latestLatency =
+    ordered.length > 0 ? ordered[ordered.length - 1]?.responseLatencyMs ?? null : null;
+
   return {
     sentiments,
     filler_density: fillerDensity,
     length_trend: lengthTrend,
     repeated_objection: repeatedObjection,
+    response_latency_ms: latestLatency,
+    // push_attempt is layered in by the caller from session state — this
+    // function doesn't know which AGENT turns "burned" an attempt and which
+    // were FAST_TRACK confirmations.
   };
 }
 

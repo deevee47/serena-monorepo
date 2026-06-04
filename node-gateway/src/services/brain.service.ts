@@ -74,6 +74,12 @@ export type RecentUserSignalsPayload = {
   filler_density?: number | null;
   length_trend?: number | null;
   repeated_objection?: string | null;
+  // Explicit 1..5 persistence counter, layered in from session state by the
+  // gateway so the prompt no longer has to infer the attempt count.
+  push_attempt?: number | null;
+  // Pre-response latency on the most recent USER turn, ms. Sourced from
+  // provider webhook timestamps.
+  response_latency_ms?: number | null;
 };
 
 export type ToolName = 'send_whatsapp_checkout_link' | 'send_whatsapp_product_info';
@@ -94,6 +100,14 @@ export type ConverseRequest = {
   customer_context?: CustomerContextPayload | null;
   recent_user_signals?: RecentUserSignalsPayload | null;
   discounts_already_offered?: number[];
+  // Call-completion offer the agent leads with in the opener. Sourced from the
+  // trigger's discount_pct (X-Discount-Pct header → Telnyx dynamic var →
+  // extra_metadata). Omitted → brain defaults to 5%. Absolute cap stays 10%.
+  opening_offer_percent?: number;
+  // Why the call exists — reshapes the brain's objective + opener. From the
+  // trigger's call_mode (X-Call-Mode → dynamic var → extra_metadata). Omitted
+  // → brain defaults to OUTBOUND_RECOVERY (today's abandoned-cart behavior).
+  call_mode?: 'INBOUND_PRESALES' | 'OUTBOUND_RECOVERY';
 };
 
 export type ConverseResponse = {
@@ -260,6 +274,16 @@ export interface ConverseStreamCallbacks {
    *  gateway uses this to fill the dead-air gap with a thinking-aloud filler
    *  ("ek minute, dekh ke batati hoon —"). */
   onThinking?: (toolName: string) => void;
+  /** Fired when the brain finishes an observation tool (e.g. list_products,
+   *  get_offer). The brain already fed the result back into its own LLM, but
+   *  the gateway captures it so it can persist the tool invocation on the
+   *  AGENT turn — that's what surfaces the observation chip in the dashboard
+   *  LiveTail. */
+  onObservation?: (obs: {
+    name: string;
+    args: Record<string, unknown>;
+    result: Record<string, unknown>;
+  }) => void;
 }
 
 export async function converseStream(
@@ -317,11 +341,15 @@ export async function converseStream(
           cb.onThinking?.(event.tool);
         } else if (event.type === 'tool_call') {
           toolCall = { name: event.name, args: event.args };
+        } else if (event.type === 'observation') {
+          cb.onObservation?.({
+            name: event.name,
+            args: event.args,
+            result: event.result,
+          });
         } else if (event.type === 'done') {
           finishReason = event.finish_reason ?? null;
         }
-        // 'observation' events are info-only for the gateway (the brain
-        // already fed the result back into the LLM). We don't act on them.
       }
     }
 

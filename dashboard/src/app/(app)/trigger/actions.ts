@@ -4,6 +4,7 @@ import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import { isAuthed } from '@/lib/auth';
 import { triggerCall } from '@/lib/gateway';
+import { getProviderOverride } from '@/lib/provider';
 
 const schema = z.object({
   phone_number: z.string().regex(/^\+[1-9]\d{1,14}$/, 'Phone must be E.164 (e.g. +14155552671)'),
@@ -37,10 +38,12 @@ export async function triggerCallAction(
     };
   }
 
+  const provider = await getProviderOverride();
   const result = await triggerCall({
     phone_number: parsed.data.phone_number,
     product_id: parsed.data.product_id,
     trigger_reason: parsed.data.trigger_reason,
+    ...(provider ? { provider } : {}),
   });
 
   if (!result.ok) {
@@ -55,7 +58,7 @@ export async function triggerCallAction(
   revalidatePath('/');
   return {
     ok: true,
-    message: 'Call queued — Vapi is dialing now.',
+    message: `Call queued — ${provider ?? 'gateway default'} is dialing now.`,
     callId: result.callId,
   };
 }

@@ -1,237 +1,180 @@
-import crypto from 'crypto';
-import got from 'got';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { config } from '../config/env.js';
 import { createCallLogger, logger } from '../utils/logger.js';
-import type { VapiWebhookEvent } from '../types/vapi.types.js';
-import { redis } from '../lib/redis.js';
 import { prisma } from '../lib/prisma.js';
+import { redis } from '../lib/redis.js';
 import {
-  createSession,
+  ensureSessionForCall,
   getSession,
-  getSessionOrThrow,
-  updateSession,
-  appendTurn,
-  getRecentHistory,
   endSession,
+  mutateSession,
 } from '../services/session.service.js';
-import {
-  converseStream,
-  type BrainConversationTurn,
-  type CartContextPayload,
-} from '../services/brain.service.js';
-import { dispatchToolCall } from '../services/converse-dispatcher.js';
-import { findAlternativeProduct, getProductById, toProductContext } from '../services/product.service.js';
-import {
-  createCallRecord,
-  getRecentTurnSignals,
-  insertCallTurn,
-  loadCallContext,
-} from '../services/db.service.js';
-import {
-  callEndQueue,
-  analyticsQueue,
-  crmQueue,
-  classifyAnalyticsQueue,
-} from '../queues/index.js';
-import { ConversationStage } from '../types/session.types.js';
+import { callEndQueue, analyticsQueue, crmQueue } from '../queues/index.js';
+import { runIsolated } from '../utils/settle.js';
+import { detectWebhookProvider, getVoiceProvider } from '../services/voice-provider/index.js';
+import { parseTexmlStatusCallback } from '../services/voice-provider/telnyx-provider.js';
+import type { NormalizedVoiceEvent } from '../services/voice-provider/types.js';
+import type { TelnyxTexmlStatusPayload } from '../types/telnyx.types.js';
+
+/** TTL for the bridge entry — long enough for the dashboard to poll a few
+ *  times after WebRTC connect, short enough not to leak. */
+const WEB_BRIDGE_TTL_SECONDS = 300;
 
 interface RequestWithRawBody extends FastifyRequest {
   rawBody?: Buffer;
 }
 
-// Per-call concurrency lock — chains processTranscript without blocking the HTTP response.
-const callLocks = new Map<string, Promise<void>>();
+async function handleCallStarted(
+  event: Extract<NormalizedVoiceEvent, { kind: 'call.started' }>,
+  voiceProvider?: string,
+): Promise<void> {
+  const metadataProductId =
+    typeof event.metadata['product_id'] === 'string'
+      ? (event.metadata['product_id'] as string)
+      : null;
+  await ensureSessionForCall({
+    callId: event.callId,
+    phoneNumber: event.phoneNumber ?? 'unknown',
+    metadataProductId,
+    voiceProvider,
+  });
 
-async function processTranscript(callId: string, utterance: string): Promise<void> {
-  const log = createCallLogger(callId);
+  // Web calls embed a bridgeUuid (client-generated) in client_state so the
+  // dashboard can resolve the canonical callId post-connect. Skip for PSTN.
+  const bridgeUuid = event.metadata['bridgeUuid'];
+  if (typeof bridgeUuid === 'string' && bridgeUuid.length > 0) {
+    await redis
+      .setex(`web_call_bridge:${bridgeUuid}`, WEB_BRIDGE_TTL_SECONDS, event.callId)
+      .catch((err) =>
+        logger.warn({ err, bridgeUuid }, 'web_call_bridge write failed (non-fatal)'),
+      );
+  }
+}
 
-  let session;
-  try {
-    session = await getSessionOrThrow(callId);
-  } catch {
-    log.warn('processTranscript: session not found, skipping');
+async function handleCallEnded(
+  event: Extract<NormalizedVoiceEvent, { kind: 'call.ended' }>,
+): Promise<void> {
+  const log = createCallLogger(event.callId);
+  const session = await getSession(event.callId);
+  if (!session) {
+    log.warn('call.ended: session not found');
     return;
   }
 
-  const product = getProductById(session.currentProductId);
-  const productContext = product ? toProductContext(product) : null;
-
-  // Best-effort alternative product lookup. The LLM uses this for the
-  // alt-vs-discount choice when price comes up. Cheap enough to attempt
-  // every turn (Pinecone hit ~50-100ms, breaker fallback is empty list).
-  let alternativeContext = null;
-  if (product) {
-    try {
-      alternativeContext = await findAlternativeProduct(session.currentProductId, 'PRICE');
-    } catch (err) {
-      log.warn({ err }, 'alternative product lookup failed (non-fatal)');
-    }
-  }
-
-  // Live customer + cart context cached on Redis so we hit Postgres once per
-  // call, not once per turn. Same hydration as the vapi-llm path.
-  const ctxKey = `call_ctx:${callId}`;
-  let loaded;
-  const cached = await redis.get(ctxKey).catch(() => null);
-  if (cached) {
-    try {
-      loaded = JSON.parse(cached) as Awaited<ReturnType<typeof loadCallContext>>;
-    } catch {
-      loaded = await loadCallContext(session.phoneNumber);
-      await redis.setex(ctxKey, 1800, JSON.stringify(loaded)).catch(() => {});
-    }
-  } else {
-    loaded = await loadCallContext(session.phoneNumber).catch(() => ({
-      customer: null,
-      cart: null,
-      primaryProductId: null,
-    }));
-    await redis.setex(ctxKey, 1800, JSON.stringify(loaded)).catch(() => {});
-  }
-
-  const recentSignals = await getRecentTurnSignals(callId, 3).catch((err) => {
-    log.warn({ err }, 'getRecentTurnSignals failed (non-fatal)');
-    return null;
-  });
-
-  // Real abandoned cart from DB when we have one; otherwise fall back to
-  // the synthetic single-product cart so the agent still has something
-  // to reference.
-  const cartContext: CartContextPayload | null =
-    loaded.cart ??
-    (product
-      ? {
-          items: [{ product_id: product.id, name: product.name, price: product.price, quantity: 1 }],
-          total: product.price,
-          abandoned_minutes_ago: null,
-        }
-      : null);
-
-  const rawHistory = await getRecentHistory(callId, 4);
-  const history: BrainConversationTurn[] = rawHistory.map((t) => ({
-    speaker: t.speaker,
-    utterance: t.utterance,
-    timestamp: t.timestamp.toISOString(),
-  }));
-
-  let vapiSayFired = false;
-  const fireVapiSayOnFirstChunk = (chunk: string) => {
-    if (!vapiSayFired) {
-      vapiSayFired = true;
-      got
-        .post(`https://api.vapi.ai/call/${callId}/say`, {
-          headers: { Authorization: `Bearer ${config.VAPI_API_KEY}` },
-          json: { message: chunk },
-        })
-        .catch((err) => log.error({ err }, 'Vapi say (first chunk) failed'));
-    }
-  };
-
-  // Single LLM call. The model decides whether to talk, call a tool, or both.
-  const result = await converseStream(
-    {
-      call_id: callId,
-      utterance,
-      conversation_history: history,
-      product_context: productContext,
-      alternative_product_context: alternativeContext,
-      cart_context: cartContext,
-      customer_context: loaded.customer,
-      recent_user_signals: recentSignals,
-      discounts_already_offered: session.discountsOffered,
-    },
-    fireVapiSayOnFirstChunk,
-  );
-
-  // Dispatch any tool the LLM picked. The dispatcher clamps discount_percent
-  // and routes to the matching whatsapp.service function.
-  let dispatch: ReturnType<typeof dispatchToolCall> | null = null;
-  if (result.tool_call) {
-    dispatch = dispatchToolCall(result.tool_call, {
-      callId,
-      phoneNumber: session.phoneNumber,
-      product: product ? { id: product.id, name: product.name, price: product.price } : null,
+  // Outcome under the converse pipeline: CONVERTED iff the LLM ever fired
+  // the checkout tool during the call. Anything else is DROPPED. Compute
+  // defensively — a failed query must not abort end-of-call processing
+  // (endSession + the analytics/CRM enqueues); default to DROPPED.
+  let outcome: 'CONVERTED' | 'DROPPED' = 'DROPPED';
+  try {
+    const checkoutTurn = await prisma.callTurn.findFirst({
+      where: { callId: event.callId, toolCalled: 'send_whatsapp_checkout_link' },
+      select: { id: true },
     });
-    log.info(
+    outcome = checkoutTurn ? 'CONVERTED' : 'DROPPED';
+  } catch (err) {
+    log.error({ err }, 'call.ended outcome query failed — defaulting to DROPPED');
+  }
+
+  await endSession(event.callId);
+
+  const discountGiven =
+    session.discountsOffered.length > 0 ? Math.max(...session.discountsOffered) : 0;
+
+  // Enqueue the three end-of-call jobs with failure isolation: a Redis blip on
+  // one add must not silently drop the others (the webhook returns 200 and the
+  // provider won't retry, so a dropped enqueue is permanent data loss).
+  await runIsolated(
+    [
       {
-        tool: dispatch.toolName,
-        applied_args: dispatch.appliedArgs,
-        whatsapp_message_id: dispatch.whatsapp?.messageId,
-        skipped: dispatch.skipped,
+        label: 'call-end',
+        run: () =>
+          callEndQueue.add('call-end', {
+            callId: event.callId,
+            outcome,
+            discountGiven,
+            turnCount: session.turnCount,
+            phoneNumber: session.phoneNumber,
+            productId: session.currentProductId,
+            durationSeconds: event.durationSeconds ?? undefined,
+          }),
       },
-      'Tool dispatched',
-    );
-  }
-
-  // Track checkout-link discount in session so the next prompt knows the LLM
-  // already offered that tier and shouldn't repeat it.
-  const sessionUpdates: Parameters<typeof updateSession>[1] = {};
-  if (dispatch?.toolName === 'send_whatsapp_checkout_link') {
-    const offered = (dispatch.appliedArgs['discount_percent'] as number | undefined) ?? 0;
-    if (offered > 0 && !session.discountsOffered.includes(offered)) {
-      sessionUpdates.discountsOffered = [...session.discountsOffered, offered];
-    }
-  }
-  if (Object.keys(sessionUpdates).length > 0) {
-    await updateSession(callId, sessionUpdates);
-  }
-
-  // Persist turns to Redis (in-memory dialog) and Postgres (audit trail).
-  const now = new Date();
-  await appendTurn(callId, { speaker: 'USER', utterance, timestamp: now });
-  await appendTurn(callId, { speaker: 'AGENT', utterance: result.text, timestamp: new Date() });
-
-  // Score/stage are no longer used for routing under the converse pipeline,
-  // but we keep them in the schema for backwards-compat with existing rows.
-  // Persist stable defaults so analytics queries don't break.
-  const turnBase = { scoreBefore: 0, scoreAfter: 0, stage: session.stage };
-
-  // Insert USER turn first; on success enqueue classify-analytics so the row
-  // gets objection_type + subtype tagged after-the-fact.
-  insertCallTurn(callId, {
-    turnNumber: session.turnCount + 1,
-    speaker: 'USER',
-    utterance,
-    ...turnBase,
-  })
-    .then((userTurnId) =>
-      classifyAnalyticsQueue
-        .add('classify', {
-          callId,
-          callTurnId: userTurnId,
-          utterance,
-          stage: session.stage,
-          score: 50,
-        })
-        .catch((err) => log.warn({ err }, 'enqueue classify-analytics failed')),
-    )
-    .catch((err) => log.error({ err }, 'DB turn insert failed (user)'));
-
-  const discountAmount =
-    dispatch?.toolName === 'send_whatsapp_checkout_link'
-      ? (dispatch.appliedArgs['discount_percent'] as number | undefined) ?? null
-      : null;
-
-  insertCallTurn(callId, {
-    turnNumber: session.turnCount + 2,
-    speaker: 'AGENT',
-    utterance: result.text,
-    toolCalled: dispatch?.toolName ?? null,
-    toolArgs: dispatch?.appliedArgs ?? null,
-    discountOffered: discountAmount,
-    ...turnBase,
-  }).catch((err) => log.error({ err }, 'DB turn insert failed (agent)'));
-
-  log.info(
-    {
-      text_len: result.text.length,
-      tool: dispatch?.toolName ?? null,
-      finish_reason: result.finish_reason,
-      discount: discountAmount ?? undefined,
-    },
-    'Turn processed',
+      {
+        label: 'analytics',
+        run: () =>
+          analyticsQueue.add('analytics', {
+            callId: event.callId,
+            outcome,
+            discountGiven,
+            turnCount: session.turnCount,
+          }),
+      },
+      {
+        label: 'crm-update',
+        run: () =>
+          crmQueue.add('crm-update', {
+            callId: event.callId,
+            phoneNumber: session.phoneNumber,
+            outcome,
+            discount: discountGiven,
+            productId: session.currentProductId,
+          }),
+      },
+    ],
+    (queueLabel, err) =>
+      log.error({ err, queue: queueLabel }, 'end-of-call enqueue failed'),
   );
+
+  log.info({ outcome, discountGiven, turnCount: session.turnCount }, 'Call ended');
+}
+
+async function handleSpeechBoundary(
+  event: Extract<NormalizedVoiceEvent, { kind: 'speech.boundary' }>,
+): Promise<void> {
+  // Provider-measured turn-taking → accurate pre-response latency. Use the
+  // provider event time when present, else webhook receipt time.
+  const atMs = event.atMs ?? Date.now();
+  try {
+    if (event.role === 'assistant' && event.status === 'stopped') {
+      // Agent finished speaking — start the clock for the next user reply.
+      await mutateSession(event.callId, () => ({
+        agentSpeechEndedAtMs: atMs,
+        pendingResponseLatencyMs: null,
+      }));
+    } else if (event.role === 'user' && event.status === 'started') {
+      // User began replying — the gap since the agent stopped IS the
+      // think-time. Compute once per gap, then clear the anchor.
+      await mutateSession(event.callId, (s) => {
+        if (s.agentSpeechEndedAtMs == null) return {};
+        return {
+          pendingResponseLatencyMs: Math.max(0, atMs - s.agentSpeechEndedAtMs),
+          agentSpeechEndedAtMs: null,
+        };
+      });
+    }
+  } catch {
+    // Session not created yet (e.g. the agent's opener stops before the first
+    // LLM turn lazily creates the session) — nothing to anchor. Safe to drop.
+  }
+}
+
+async function handleRecordingReady(
+  event: Extract<NormalizedVoiceEvent, { kind: 'recording.ready' }>,
+): Promise<void> {
+  const log = createCallLogger(event.callId);
+  if (!event.recordingUrl && !event.stereoRecordingUrl && !event.recordingId) {
+    return;
+  }
+  await prisma.call
+    .update({
+      where: { callId: event.callId },
+      data: {
+        recordingUrl: event.recordingUrl,
+        stereoRecordingUrl: event.stereoRecordingUrl,
+        providerRecordingId: event.recordingId,
+      },
+    })
+    .catch((err) => log.error({ err }, 'Failed to persist recording URLs'));
 }
 
 export default async function webhookRoutes(app: FastifyInstance) {
@@ -266,145 +209,129 @@ export default async function webhookRoutes(app: FastifyInstance) {
         return reply.status(400).send({ error: 'Missing body' });
       }
 
-      const authHeader = request.headers['authorization'] as string | undefined;
-      const expected = `Bearer ${config.VAPI_WEBHOOK_SECRET}`;
-      const expBuf = Buffer.from(expected);
-      const authBuf = Buffer.from(authHeader ?? '');
-      const valid = authBuf.length === expBuf.length && crypto.timingSafeEqual(authBuf, expBuf);
-      if (!valid) {
-        logger.warn({ ip: request.ip }, 'Invalid webhook auth');
+      // Auto-detect which provider this webhook is from by inspecting the
+      // request headers. Both providers can hit the same /webhook URL —
+      // Telnyx carries `telnyx-signature-ed25519`, Vapi carries Bearer.
+      const providerName = detectWebhookProvider(request.headers);
+      const provider = getVoiceProvider(providerName);
+
+      // Dev-only: dump headers + body when we're in insecure mode, so we can
+      // see what Telnyx actually sends and tighten the verifier.
+      if (config.TELNYX_INSECURE_DEV === '1' && provider.name === 'telnyx') {
+        logger.warn(
+          {
+            headers: request.headers,
+            body_preview: rawBody.toString('utf8').slice(0, 2000),
+          },
+          'TELNYX_INSECURE_DEV: incoming webhook',
+        );
+      }
+
+      const verification = provider.verifyWebhook(rawBody, request.headers);
+      if (!verification.ok) {
+        logger.warn(
+          {
+            ip: request.ip,
+            reason: verification.reason,
+            // Echo the keys (not values) so we can spot signature-header
+            // naming mismatches without leaking sensitive data.
+            header_keys: Object.keys(request.headers),
+          },
+          'Invalid webhook auth',
+        );
         return reply
           .status(401)
           .send({ error: { code: 'INVALID_SIGNATURE', message: 'Unauthorized' } });
       }
 
-      const event = request.body as VapiWebhookEvent;
-      const type = event?.message?.type;
-      const callId = event?.message?.call?.id ?? 'unknown';
-      const log = createCallLogger(callId);
+      const events = provider.parseWebhook(rawBody, request.body);
+      if (events.length === 0) {
+        return reply.send({});
+      }
 
-      log.info({ type }, 'Vapi webhook received');
+      // Synchronous Vapi-only flow: if any event carries an assistantId to
+      // echo back, send it now and skip the rest (Vapi's assistant-request
+      // is a synchronous RPC and processing continues via Custom LLM).
+      const initEvent = events.find(
+        (e): e is Extract<NormalizedVoiceEvent, { kind: 'call.started' }> =>
+          e.kind === 'call.started' && Boolean(e.respondWithAssistantId),
+      );
+      if (initEvent) {
+        await handleCallStarted(initEvent, provider.name);
+        return reply.send({ assistantId: initEvent.respondWithAssistantId });
+      }
 
-      // ── assistant-request ──────────────────────────────────────────────
-      if (type === 'assistant-request') {
-        let productId =
-          (event.message.call.metadata?.['product_id'] as string | undefined) ?? 'prod-001';
+      for (const event of events) {
+        const log = createCallLogger(event.callId);
+        log.info({ kind: event.kind, provider: provider.name }, 'webhook event');
         try {
-          const raw = await redis.get(`pending_call:${callId}`);
-          if (raw) {
-            const pending = JSON.parse(raw) as { productId: string; triggerReason: string };
-            productId = pending.productId;
-          } else if (!event.message.call.metadata?.['product_id']) {
-            log.warn('No pending_call found in Redis — using default product');
+          switch (event.kind) {
+            case 'call.started':
+              await handleCallStarted(event, provider.name);
+              break;
+            case 'call.ended':
+              await handleCallEnded(event);
+              break;
+            case 'recording.ready':
+              await handleRecordingReady(event);
+              break;
+            case 'speech.boundary':
+              await handleSpeechBoundary(event);
+              break;
           }
         } catch (err) {
-          log.error(
-            { err },
-            'Redis get pending_call failed — using request metadata or default product',
-          );
+          log.error({ err, kind: event.kind }, 'webhook handler failed');
         }
-
-        const phoneNumber =
-          (event.message.call as { customer?: { number?: string } }).customer?.number ?? 'unknown';
-        const session = await createSession({ callId, phoneNumber, productId });
-
-        createCallRecord(session).catch((err) => log.error({ err }, 'createCallRecord failed'));
-
-        return reply.send({ assistantId: config.VAPI_ASSISTANT_ID });
-      }
-
-      // ── transcript ─────────────────────────────────────────────────────
-      // Under Custom LLM mode (the supported flow), every turn is handled by
-      // /vapi-llm/chat/completions. The transcript event arrives here as
-      // well, but we ignore it — processing it would duplicate every
-      // call_turn row and run the brain twice per turn.
-      if (type === 'transcript') {
-        return reply.send({});
-      }
-
-      // ── status-update ─────────────────────────────────────────────────
-      if (type === 'status-update') {
-        const status = (event.message as { status?: string }).status;
-        log.info({ status }, 'Call status update');
-        return reply.send({});
-      }
-
-      // ── end-of-call-report ────────────────────────────────────────────
-      if (type === 'end-of-call-report') {
-        const session = await getSession(callId);
-        if (!session) {
-          log.warn('end-of-call-report: session not found');
-          return reply.send({});
-        }
-
-        // Outcome under the converse pipeline: CONVERTED iff the LLM ever
-        // fired the checkout tool during the call. Anything else is DROPPED.
-        const checkoutTurn = await prisma.callTurn.findFirst({
-          where: { callId, toolCalled: 'send_whatsapp_checkout_link' },
-          select: { id: true, toolArgs: true },
-        });
-        const outcome: 'CONVERTED' | 'DROPPED' = checkoutTurn ? 'CONVERTED' : 'DROPPED';
-
-        const report = event.message as {
-          durationSeconds?: number;
-          recordingUrl?: string | null;
-          stereoRecordingUrl?: string | null;
-        };
-        await endSession(callId);
-
-        if (report.recordingUrl || report.stereoRecordingUrl) {
-          prisma.call
-            .update({
-              where: { callId },
-              data: {
-                recordingUrl: report.recordingUrl ?? null,
-                stereoRecordingUrl: report.stereoRecordingUrl ?? null,
-              },
-            })
-            .catch((err) => log.error({ err }, 'Failed to persist recording URLs'));
-        }
-
-        const discountGiven =
-          session.discountsOffered.length > 0 ? Math.max(...session.discountsOffered) : 0;
-
-        await callEndQueue.add('call-end', {
-          callId,
-          outcome,
-          finalScore: 0, // deprecated under converse pipeline
-          discountGiven,
-          stageReached: outcome === 'CONVERTED' ? 'CONVERTED' : 'DROPPED',
-          turnCount: session.turnCount,
-          phoneNumber: session.phoneNumber,
-          productId: session.currentProductId,
-          durationSeconds: report.durationSeconds,
-        });
-
-        await analyticsQueue.add('analytics', {
-          callId,
-          outcome,
-          finalScore: 0,
-          discountGiven,
-          stageReached: outcome,
-          turnCount: session.turnCount,
-        });
-
-        await crmQueue.add('crm-update', {
-          callId,
-          phoneNumber: session.phoneNumber,
-          outcome,
-          discount: discountGiven,
-          productId: session.currentProductId,
-        });
-
-        callLocks.delete(callId);
-
-        log.info({ outcome, discountGiven, turnCount: session.turnCount }, 'Call ended');
-        return reply.send({});
       }
 
       return reply.send({});
     },
   );
+
+  // Telnyx TeXML status callbacks: application/x-www-form-urlencoded, NOT the
+  // JSON Voice API envelope handled by /webhook. The TeXML application's
+  // `status_callback` field points here. Body is auto-decoded by @fastify/formbody.
+  // No Ed25519 signature — TeXML uses Twilio-style HMAC on a different header
+  // path; we skip verification here while wiring it up and rely on the
+  // ngrok-only routing in dev.
+  app.post('/webhook/telnyx', async (request: FastifyRequest, reply: FastifyReply) => {
+    const body = request.body as Partial<TelnyxTexmlStatusPayload> | undefined;
+    if (!body || typeof body !== 'object') {
+      return reply.status(400).send({ error: 'Missing form body' });
+    }
+
+    const events = parseTexmlStatusCallback(body);
+    if (events.length === 0) {
+      // Non-actionable status (ringing/answered/in-progress/analyzed) — ack
+      // quickly so Telnyx doesn't retry.
+      return reply.send({});
+    }
+
+    for (const event of events) {
+      const log = createCallLogger(event.callId);
+      log.info(
+        { kind: event.kind, provider: 'telnyx', call_status: body.CallStatus },
+        'TeXML status webhook',
+      );
+      try {
+        switch (event.kind) {
+          case 'call.started':
+            await handleCallStarted(event, 'telnyx');
+            break;
+          case 'call.ended':
+            await handleCallEnded(event);
+            break;
+          case 'recording.ready':
+            await handleRecordingReady(event);
+            break;
+        }
+      } catch (err) {
+        log.error({ err, kind: event.kind }, 'TeXML webhook handler failed');
+      }
+    }
+
+    return reply.send({});
+  });
 
   // Debug endpoint — dev only
   if (config.NODE_ENV === 'development') {
@@ -415,7 +342,3 @@ export default async function webhookRoutes(app: FastifyInstance) {
     });
   }
 }
-
-// Suppress unused-import warning — ConversationStage is referenced via
-// session.stage typing implicitly.
-void ConversationStage;

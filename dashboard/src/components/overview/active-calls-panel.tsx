@@ -34,7 +34,7 @@ export function ActiveCallsPanel({ calls }: ActiveCallsPanelProps) {
       {calls.map((c) => (
         <li key={c.callId}>
           <Link
-            href={`/live/${c.callId}`}
+            href={`/live/${encodeURIComponent(c.callId)}`}
             className={cn(
               'group/active flex items-center gap-2.5 border border-border/60 px-2.5 py-2',
               'transition-colors hover:border-ff-orange/60 hover:bg-secondary/40',
