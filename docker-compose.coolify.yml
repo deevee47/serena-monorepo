@@ -1,0 +1,127 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Production stack for Coolify.  Postgres is EXTERNAL (Neon) — set DATABASE_URL +
+# DATABASE_URL_DIRECT in the Coolify env.  See docs/DEPLOY_COOLIFY.md.
+#
+# Deploy: create a "Docker Compose" resource in Coolify pointed at this repo and
+# this file.  Assign domains in the Coolify UI:
+#     dashboard     ->  https://app.<your-domain>   (container port 4000)
+#     node-gateway  ->  https://api.<your-domain>   (container port 3000)
+# brain, worker, redis and migrate stay internal (no domain).
+#
+# Secret/config env (DATABASE_URL, OPENAI_API_KEY, VAPI_*, INTERNAL_SERVICE_SECRET,
+# DASHBOARD_PASSWORD, …) is set in Coolify's "Environment Variables" tab and
+# injected into every service — see .env.coolify.example.  The `environment:`
+# blocks below only pin the INTERNAL service-to-service wiring (service-name URLs)
+# that must differ from the .env.example localhost defaults.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # One-shot: applies pending Prisma migrations to Neon, then exits 0. Every other
+  # service waits for it to complete so they never serve against an un-migrated DB.
+  migrate:
+    build:
+      context: .
+      dockerfile: node-gateway/Dockerfile.coolify
+    command: ['bunx', 'prisma', 'migrate', 'deploy']
+    restart: 'no'
+
+  fastapi-brain:
+    build:
+      context: .
+      dockerfile: fastapi-brain/Dockerfile
+    restart: unless-stopped
+    expose:
+      - '8000'
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    environment:
+      - ENVIRONMENT=production
+      - NODE_GATEWAY_URL=http://node-gateway:3000
+    healthcheck:
+      test: ['CMD', 'python', '-c', "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 25s
+
+  node-gateway:
+    build:
+      context: .
+      dockerfile: node-gateway/Dockerfile.coolify
+    restart: unless-stopped
+    expose:
+      - '3000'
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      fastapi-brain:
+        condition: service_started
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - REDIS_URL=redis://redis:6379
+      - FASTAPI_BRAIN_URL=http://fastapi-brain:8000
+    healthcheck:
+      test: ['CMD', 'bun', '-e', "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  node-worker:
+    build:
+      context: .
+      dockerfile: node-gateway/Dockerfile.coolify
+    command: ['bun', 'node-gateway/src/workers.ts']
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    environment:
+      - NODE_ENV=production
+      - REDIS_URL=redis://redis:6379
+      - FASTAPI_BRAIN_URL=http://fastapi-brain:8000
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+      args:
+        # Build-time: baked into next.config Server-Action allow-list.
+        - DASHBOARD_DOMAIN=${DASHBOARD_DOMAIN}
+    restart: unless-stopped
+    expose:
+      - '4000'
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      node-gateway:
+        condition: service_started
+    environment:
+      - NODE_ENV=production
+      - REDIS_URL=redis://redis:6379
+      - GATEWAY_URL=http://node-gateway:3000
+      - FASTAPI_BRAIN_URL=http://fastapi-brain:8000
+
+volumes:
+  redis_data:

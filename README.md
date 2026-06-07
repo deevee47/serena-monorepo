@@ -1,13 +1,15 @@
 # Serena — Voice AI Sales Agent
 
 Serena is a production-grade voice sales agent that runs on live phone calls via
-Vapi. When a cart-abandonment customer picks up, a single function-calling LLM
-drives the whole conversation — it opens with their name, cart, and a call-completion
-offer, looks up real facts (reviews, inventory, delivery ETA, recent purchases,
-promotional offers), adapts tone to their sentiment turn by turn, and can fire a
-WhatsApp checkout link when they're ready to buy.
+Vapi **or** Telnyx. When a cart-abandonment customer picks up, a single
+function-calling LLM drives the whole conversation — it opens with their name, cart,
+and a call-completion offer, looks up real facts (reviews, inventory, delivery ETA,
+recent purchases, promotional offers), adapts tone to their sentiment turn by turn,
+and can fire a WhatsApp checkout link when they're ready to buy. The same agent also
+handles **inbound presales** calls — the opener and objective branch on a `call_mode`
+of `INBOUND_PRESALES` vs `OUTBOUND_RECOVERY`.
 
-There is **no rules engine** — sales competence lives in a system prompt + 7 tool
+There is **no rules engine** — sales competence lives in a system prompt + 8 tool
 schemas. The agent is **Serena**, a sales operator for **Muscleblaze**.
 
 > **New to the codebase?** Read [`ARCHITECTURE_STUDY.md`](ARCHITECTURE_STUDY.md) for the
@@ -18,27 +20,37 @@ schemas. The agent is **Serena**, a sales operator for **Muscleblaze**.
 ## Architecture
 
 ```
-Vapi (phone call) ──► node-gateway (Bun/Fastify) ──► fastapi-brain (Python)
-   Custom LLM mode          │                              │
-                          Redis                       OpenAI GPT-4o
-                          BullMQ ──► node-worker       Pinecone (vector search)
-                          Prisma ──► PostgreSQL (Neon)
+Vapi / Telnyx (phone call) ──► node-gateway (Bun/Fastify) ──► fastapi-brain (Python)
+   Custom LLM mode                  │                              │
+                                  Redis                       OpenAI GPT-4o
+                                  BullMQ ──► node-worker       Pinecone (vector search)
+                                  Prisma ──► PostgreSQL (Neon)
+                                    │
+                                  dashboard (Next.js, port 4000)
 ```
 
-Vapi runs in **Custom LLM mode**: it calls the gateway's OpenAI-compatible
-`/vapi-llm/chat/completions` adapter once per turn, the gateway routes through to
-the brain's `/converse/stream`, and the agent's text streams back as OpenAI-format
-SSE chunks.
+The telephony layer is **provider-agnostic**: a `VoiceProvider` interface
+([`voice-provider/`](node-gateway/src/services/voice-provider/)) is implemented by
+both a `VapiProvider` and a `TelnyxProvider`, selected by the `VOICE_PROVIDER` env
+(default `vapi`) and auto-detected per request (`detectWebhookProvider` /
+`detectLlmProvider`). Vapi authenticates webhooks with a Bearer secret; Telnyx uses
+Ed25519 signature verification ([`ed25519.ts`](node-gateway/src/services/voice-provider/ed25519.ts),
+tweetnacl, ±300s replay window).
+
+The provider runs in **Custom LLM mode**: it calls the gateway's OpenAI-compatible
+adapter once per turn — mounted at both `/llm/chat/completions` (canonical) and the
+legacy `/vapi-llm/chat/completions` — the gateway routes through to the brain's
+`/converse/stream`, and the agent's text streams back as OpenAI-format SSE chunks.
 
 | Service | Port | Role |
 |---|---|---|
-| `node-gateway` | 3000 | Vapi Custom-LLM adapter, session state, live context loading, tool dispatch, Postgres writes, outbound calls |
-| `fastapi-brain` | 8000 | Function-calling LLM orchestration, observation tools, analytics-only objection classifier, Pinecone search |
-| `node-worker` | — | BullMQ worker process: post-call DB writes, async objection tagging, analytics/CRM stubs |
+| `node-gateway` | 3000 | Custom-LLM adapter (Vapi + Telnyx), session state, live context loading, tool dispatch, Postgres writes, outbound calls |
+| `fastapi-brain` | 8000 | Function-calling LLM orchestration, observation tools, objection classifier, on-demand call insights, Pinecone search |
+| `node-worker` | — | BullMQ worker process: post-call DB writes, call-insight generation, async objection tagging, analytics/CRM stubs |
+| `dashboard` | 4000 | Next.js operator cockpit: calls list/detail, live-tail SSE, trigger/talk pages, content CRUD, insight cards |
 | `redis` | 6379 | Session store, BullMQ queues, rate-limit + daily call-cap counters |
 
-There is **no frontend** — Serena is a backend, server-to-server system. Postgres
-(Neon) is the durable source of truth; Pinecone holds two vector indexes
+Postgres (Neon) is the durable source of truth; Pinecone holds two vector indexes
 (`voice-agent-products`, `voice-agent-objections`).
 
 ---
@@ -51,7 +63,8 @@ There is **no frontend** — Serena is a backend, server-to-server system. Postg
 - [uv](https://docs.astral.sh/uv/) ≥ 0.4 (Python package manager)
 - [Docker](https://docs.docker.com/get-docker/) (for Redis + Compose)
 - A [Neon](https://neon.tech) PostgreSQL database
-- A [Vapi](https://vapi.ai) account with a phone number and an assistant in Custom LLM mode
+- A [Vapi](https://vapi.ai) account **or** a [Telnyx](https://telnyx.com) account — whichever
+  `VOICE_PROVIDER` points at — with a phone number and an assistant in Custom LLM mode
 - An [OpenAI](https://platform.openai.com) API key
 - A [Pinecone](https://pinecone.io) API key + an index named `voice-agent-products` (dim=1536, cosine)
 
@@ -69,13 +82,14 @@ make setup
 
 `make setup` runs: `bun install` → `uv sync` → `docker-compose up -d redis` →
 `prisma generate` (JS + Python clients) → `prisma migrate deploy` → `make seed`
-(seeds the original 8 products via `scripts/seed.ts`).
+(seeds 80 clothing variants via `scripts/seed.ts`).
 
 ### 3. Seed the full demo dataset (recommended for the CLI + eval)
 
-`make seed` only loads 8 products. The interactive CLI and eval suite expect the
-full demo dataset — 43 products, 72 reviews, 10 customers across all segments with
-abandoned carts, and 26 promotional offers:
+`make seed` only loads the clothing variants. The interactive CLI and eval suite
+expect the full demo dataset — chairs, proteins, nutrition accessories, and clothes,
+with reviews, 10 customers across all segments with abandoned carts, and BUNDLE /
+QUANTITY promotional offers:
 
 ```bash
 bun run scripts/seed-demo-data.ts   # idempotent — safe to re-run
@@ -96,7 +110,15 @@ embeddings, and upserts them into Pinecone. Idempotent.
 make dev   # docker-compose up: redis + node-gateway + fastapi-brain + node-worker
 ```
 
-For local development with faster hot-reload (no Docker for the app services):
+For local development with faster hot-reload (no Docker for the app services), the
+one-command path boots Redis (Docker) plus the full Bun/uv stack —
+gateway + brain + worker + dashboard — via `concurrently`:
+
+```bash
+bun run dev:all   # redis + gateway (:3000) + brain (:8000) + worker + dashboard (:4000)
+```
+
+Or run each process by hand:
 
 ```bash
 # Terminal 1 — Redis only
@@ -109,13 +131,16 @@ cd node-gateway && FASTAPI_BRAIN_URL=http://127.0.0.1:8000 bun run dev
 cd fastapi-brain && NODE_GATEWAY_URL=http://127.0.0.1:3000 uv run uvicorn app.main:app --reload --port 8000
 
 # Terminal 4 — BullMQ worker
-cd node-gateway && bun run src/workers.ts
+cd node-gateway && bun --watch src/workers.ts
+
+# Terminal 5 — Next.js dashboard (optional)
+cd dashboard && bun run dev
 ```
 
 The shared `.env` defaults to Docker service hostnames (`fastapi-brain`,
 `node-gateway`). When running both services directly on your host, override those
-URLs to `127.0.0.1` as shown. The root `bun run dev` script wraps terminals 2–3 via
-`concurrently` if you prefer one command.
+URLs to `127.0.0.1` as shown. The lighter root `bun run dev` script wraps terminals
+2–3 (gateway + brain only) via `concurrently` if you prefer one command.
 
 ---
 
@@ -144,7 +169,7 @@ quality concern → inventory question → price pushback → bundle accept → 
 against the gateway at `localhost:3000`, polling `/debug/session/:callId` to print
 the agent's responses and session state per turn.
 
-### Trigger a real outbound call via Vapi
+### Trigger a real outbound call
 
 ```bash
 curl -X POST http://localhost:3000/calls/trigger \
@@ -160,9 +185,12 @@ curl -X POST http://localhost:3000/calls/trigger \
 `POST /calls/trigger` is gated by the `x-admin-secret` header. The body is Zod-validated:
 `phone_number` (E.164), `product_id`, and `trigger_reason` ∈
 `{cart_abandon, page_view, wishlist, manual}`; an optional `metadata` object is
-forwarded to Vapi. The gateway enforces a 3-calls-per-number-per-day cap, calls
-Vapi's `/call/phone` API with timezone-aware voice + pacing overrides, stashes
-`pending_call:<callId>` in Redis, and returns `202 { "call_id": "..." }`.
+forwarded to the provider, and an optional `provider` ∈ `{vapi, telnyx}` overrides the
+`VOICE_PROVIDER` default for this one call. The gateway enforces a
+3-calls-per-number-per-day cap, calls the active provider's create-call API
+(`createPhoneCall` — Vapi `/call/phone` or Telnyx `/v2/calls`) with timezone-aware
+voice + pacing overrides, stashes `pending_call:<callId>` in Redis, and returns
+`202 { "call_id": "..." }`.
 
 If the call is triggered without an explicit `product_id` (or with `prod-001`), the
 gateway prefers the customer's actually-abandoned cart product once it loads their
@@ -216,25 +244,30 @@ docker-compose logs -f node-gateway | grep '"call_id":"<callId>"'
 
 ### BullMQ jobs
 
-The `node-worker` process runs four queues — `call-end-queue`, `analytics-queue`,
-`crm-queue`, `classify-analytics-queue` (all `attempts: 3`, exponential backoff). A
-dead-letter monitor logs to stderr every 5 minutes if any queue has failed jobs.
+The `node-worker` process runs five queues — `call-end-queue`, `insights-queue`,
+`analytics-queue`, `crm-queue`, `classify-analytics-queue` (all `attempts: 3`,
+exponential backoff). The call-end worker finalizes the `Call` row and enqueues an
+`insights-queue` job; `insightsWorker` POSTs the brain's `/insights/generate` to write
+the `CallInsight`. A dead-letter monitor logs to stderr every 5 minutes if any queue
+has failed jobs.
 
 ### FastAPI interactive docs
 
 `http://localhost:8000/docs` — available when `ENVIRONMENT` is not `production`. You
-can exercise `/converse`, `/classify`, and `/products/alternatives` from the browser
-(all require the `X-Internal-Secret` header).
+can exercise `/converse`, `/classify`, `/insights/generate`, and
+`/products/alternatives` from the browser (all require the `X-Internal-Secret`
+header).
 
 ---
 
 ## How the agent works
 
-### The 7 tools
+### The 8 tools
 
-The LLM is given 7 tools, in two categories:
+The LLM is given 8 tools, in two categories:
 
-**Side-effect tools** (end the turn; the gateway dispatches them out-of-band):
+**Side-effect tools** (end the turn; the gateway dispatches them out-of-band, to a
+demo WhatsApp sender in [`whatsapp.service.ts`](node-gateway/src/services/whatsapp.service.ts)):
 - `send_whatsapp_checkout_link(discount_percent: 0-10)` — fires when the customer is ready to buy
 - `send_whatsapp_product_info()` — graceful exit; sends product details, no checkout link
 
@@ -245,9 +278,13 @@ then re-streams a response grounded in the data):
 - `get_review_summary(product_id)`
 - `get_delivery_eta(zip_code, product_id)`
 - `get_available_offers(product_id)` — DB-authorized BUNDLE / QUANTITY offers
+- `list_products(category?, max_results)` — catalog overview / category browse
 
-Discounts are clamped to 10% in **three independent layers**: the Pydantic tool
-schema, the brain's route validation, and the gateway dispatcher.
+The tool schemas are the single source of truth in
+[`tools.py`](fastapi-brain/app/services/tools.py) (`OPENAI_TOOLS`); the gateway only
+ever surfaces the 2 side-effect tools (`ToolName`), since the 6 observation tools run
+inside the brain. Discounts are clamped to 10% in **three independent layers**: the
+Pydantic tool schema, the brain's route validation, and the gateway dispatcher.
 
 ### Human-feel pacing
 
@@ -263,7 +300,17 @@ The agent is tuned to sound like a person on a real call:
   positive streak).
 - **Thinking fillers** — while an observation tool runs, the gateway streams a short
   TTS-friendly phrase ("one sec, checking stock —") so there's no dead air.
-- **Voice tuning** — outbound calls set Vapi `assistantOverrides` (12s silence timeout,
+- **Call-mode branching** — `call_mode` (`OUTBOUND_RECOVERY` default vs
+  `INBOUND_PRESALES`) reshapes the brain's objective and opener: outbound opens on the
+  abandoned cart with a call-completion offer, inbound opens as a cold presales greeting
+  with no cart. It flows from the trigger/talk metadata through the gateway into
+  `ConverseRequest.call_mode` and branches `_objective()` / `_call_opening()` vs
+  `_inbound_opening()` in the prompt builder.
+- **Response-latency telemetry** — pre-response latency is anchored on provider
+  `speech.boundary` webhook events (Vapi `speech-update`), falling back to a word-count
+  TTS estimate ([`tts-estimate.ts`](node-gateway/src/lib/tts-estimate.ts), 165 WPM); it
+  is persisted as `CallTurn.responseLatencyMs` and fed back to the brain as a signal.
+- **Voice tuning** — outbound Vapi calls set `assistantOverrides` (12s silence timeout,
   0.4s response delay, 2-word interrupt threshold, backchanneling) and pick a
   timezone-aware voice (Hindi for Indian timezones, English otherwise).
 
@@ -280,7 +327,7 @@ The catalog lives in **Postgres**, not in code. `node-gateway` loads it into an
 in-memory map at boot via `loadCatalog()` ([`product.service.ts`](node-gateway/src/services/product.service.ts)).
 
 To change products:
-1. Edit [`scripts/seed.ts`](scripts/seed.ts) (the base 8) or
+1. Edit [`scripts/seed.ts`](scripts/seed.ts) (the clothing variants) or
    [`scripts/seed-demo-data.ts`](scripts/seed-demo-data.ts) (the full demo set).
 2. Re-run the seed script.
 3. Re-run `uv run python scripts/embed-products.py` to refresh Pinecone vectors.
@@ -295,9 +342,9 @@ To change products:
 | What | Where |
 |---|---|
 | Agent name & business | `build_converse_system_prompt(... agent_name="Serena", business_name="Muscleblaze")` |
-| Identity / persona | `_objective()` |
+| Identity / persona | `_objective()` (branches on `call_mode`) |
 | Sales playbook | `_principles()` |
-| Opening pattern | `_call_opening()` (with LAPSED / VIP variants) |
+| Opening pattern | `_call_opening()` outbound (with LAPSED / VIP variants); `_inbound_opening()` inbound |
 | Voice, language, disfluencies | `VOICE_RULES`, `LANGUAGE_RULES`, `DISFLUENCY_AND_HUMOR` in `prompt_sections.py` |
 | Sentiment-adaptive overrides | `_adaptive_behavior()` |
 | Hard guardrails | `HARD_CONSTRAINTS` in `prompt_sections.py` |
@@ -347,13 +394,39 @@ and [`fastapi-brain/app/config/settings.py`](fastapi-brain/app/config/settings.p
 | `LOG_LEVEL` | — | `debug` \| `info` \| `warn` \| `error`. Default `info` |
 | `FASTAPI_BRAIN_URL` | ✅ | URL the gateway uses to reach the brain |
 | `ADMIN_SECRET` | ✅ | Secret for the `x-admin-secret` header on `/calls/trigger` |
-| `VAPI_WEBHOOK_SECRET` | ✅ | Bearer secret Vapi sends on webhooks + Custom-LLM requests |
-| `VAPI_API_KEY` | ✅ | Vapi API key for outbound calls and `/say` |
-| `VAPI_ASSISTANT_ID` | ✅ | The Vapi assistant attached to each call |
+| `VOICE_PROVIDER` | — | Active telephony provider: `vapi` \| `telnyx`. Default `vapi` |
+
+The Vapi vs Telnyx vars below are **conditionally required** — `config/env.ts`'s
+`superRefine` only enforces the block matching `VOICE_PROVIDER`.
+
+**Vapi** (required when `VOICE_PROVIDER=vapi`):
+
+| Variable | Required | Description |
+|---|---|---|
+| `VAPI_WEBHOOK_SECRET` | ✅* | Bearer secret Vapi sends on webhooks + Custom-LLM requests |
+| `VAPI_API_KEY` | ✅* | Vapi API key for outbound calls |
+| `VAPI_ASSISTANT_ID` | ✅* | The Vapi assistant attached to each call |
 | `VAPI_PHONE_NUMBER_ID` | — | Which registered Vapi number to dial from |
+| `VAPI_PUBLIC_KEY` | — | Public key for the dashboard's Vapi web-call (Talk page) |
 | `VAPI_VOICE_EN` | — | Voice ID for English-timezone callers (assistant override) |
 | `VAPI_VOICE_HI` | — | Voice ID for Indian-timezone callers (assistant override) |
 | `VAPI_CUSTOM_LLM_URL` | — | Public gateway URL Vapi calls in Custom-LLM mode (ngrok / staging / prod) |
+
+**Telnyx** (required when `VOICE_PROVIDER=telnyx`):
+
+| Variable | Required | Description |
+|---|---|---|
+| `TELNYX_API_KEY` | ✅* | Telnyx API key for outbound calls |
+| `TELNYX_PUBLIC_KEY` | ✅* | Base64 Ed25519 public key for webhook signature verification |
+| `TELNYX_ASSISTANT_ID` | ✅* | Default Telnyx assistant attached to each call |
+| `TELNYX_ASSISTANT_EN` | — | Per-locale assistant override for English callers |
+| `TELNYX_ASSISTANT_HI` | — | Per-locale assistant override for Hindi callers |
+| `TELNYX_PHONE_NUMBER` | — | Telnyx DID to dial from |
+| `TELNYX_PHONE_NUMBER_ID` | — | Telnyx phone-number id |
+| `TELNYX_TELEPHONY_CREDENTIAL_ID` | — | Mints short-lived JWTs for the dashboard's Telnyx web-call |
+| `TELNYX_LLM_SHARED_SECRET` | — | Bearer secret Telnyx attaches to Custom-LLM POSTs |
+| `LLM_URL` | — | Public gateway URL the Telnyx assistant POSTs to (Custom-LLM endpoint) |
+| `TELNYX_INSECURE_DEV` | — | `0` \| `1`. When `1`, skip Ed25519 verification + log raw webhook/LLM payloads. Default `0`. Dev only |
 
 ### FastAPI brain
 
@@ -381,23 +454,25 @@ serena/
 │   └── src/
 │       ├── server.ts            # boot + listen
 │       ├── app.ts               # Fastify app: plugins, routes, catalog load
-│       ├── workers.ts           # BullMQ worker process (runs as node-worker)
+│       ├── workers.ts           # BullMQ worker process (runs as node-worker) — 5 queues
 │       ├── routes/
-│       │   ├── vapi-llm.ts      # POST /vapi-llm/chat/completions — per-turn hot path
-│       │   ├── webhook.ts       # POST /webhook (Vapi lifecycle); GET /debug/session/:callId
-│       │   ├── calls.ts         # POST /calls/trigger — outbound call trigger
-│       │   └── health.ts        # GET /health
+│       │   ├── llm.ts           # POST /llm/* + /vapi-llm/* chat/completions — per-turn hot path
+│       │   ├── webhook.ts       # POST /webhook (auto-detect provider) + /webhook/telnyx (TeXML); GET /debug/session/:callId
+│       │   ├── calls.ts         # POST /calls/trigger, /calls/opener; GET /calls/web-config, /calls/:id/recording
+│       │   └── health.ts        # GET /health, /ready
 │       ├── services/
 │       │   ├── brain.service.ts          # HTTP client to the brain + circuit breakers
 │       │   ├── converse-dispatcher.ts    # tool_call → side-effect routing + discount clamp
 │       │   ├── thinking-filler.ts        # TTS fillers for observation-tool latency
+│       │   ├── opener.service.ts         # authoritative opener generator (branches on call_mode)
 │       │   ├── session.service.ts        # Redis-backed CallSession
 │       │   ├── db.service.ts             # Prisma writes, loadCallContext, getRecentTurnSignals
 │       │   ├── product.service.ts        # DB-loaded catalog + Pinecone alternative lookup
-│       │   └── whatsapp.service.ts       # WhatsApp send (demo stub — swap simulateSend to go live)
+│       │   ├── whatsapp.service.ts       # WhatsApp send (demo stub — swap simulateSend to go live)
+│       │   └── voice-provider/           # VoiceProvider interface + Vapi/Telnyx adapters + ed25519 verify
 │       ├── queues/index.ts      # BullMQ queue definitions
-│       ├── config/env.ts        # Zod-validated environment
-│       └── lib/                 # redis, prisma, rate-limit store
+│       ├── config/env.ts        # Zod-validated environment (VOICE_PROVIDER switch)
+│       └── lib/                 # redis, prisma, rate-limit store, tts-estimate, key-mutex
 │
 ├── fastapi-brain/               # Python + FastAPI brain (port 8000)
 │   └── app/
@@ -405,36 +480,40 @@ serena/
 │       ├── routes/
 │       │   ├── converse.py      # POST /converse + POST /converse/stream
 │       │   ├── classify.py      # POST /classify — analytics-only objection classifier
+│       │   ├── insights.py      # POST /insights/generate — on-demand call insights
 │       │   ├── products.py      # POST /products/alternatives
-│       │   └── health.py        # GET /health
+│       │   └── health.py        # GET /health, /ready
 │       ├── services/
 │       │   ├── llm.py                     # OpenAI streaming + observation-tool loop
-│       │   ├── converse_prompt_builder.py # per-call system prompt assembly
+│       │   ├── converse_prompt_builder.py # per-call system prompt assembly (call_mode branch)
 │       │   ├── prompt_sections.py         # reusable prompt blocks + formatters
-│       │   ├── tools.py                   # 7 tool schemas (Pydantic → OpenAI JSON schema)
-│       │   ├── observations.py            # 5 observation-tool implementations
-│       │   ├── signals.py                 # recent-user-signal helpers
+│       │   ├── tools.py                   # 8 tool schemas (Pydantic → OpenAI JSON schema)
+│       │   ├── observations.py            # 6 observation-tool implementations
 │       │   ├── classifier.py              # hybrid objection classifier
 │       │   ├── objection_index.py         # Pinecone NN classifier
 │       │   └── product.py                 # Pinecone product search
 │       ├── config/settings.py   # pydantic-settings environment
 │       └── eval/scenarios.jsonl # 22 canonical eval scenarios
 │
+├── dashboard/                   # Next.js operator cockpit (port 4000)
+│   └── src/                     # calls list/detail, live-tail SSE, trigger/talk, content CRUD, insights
+│
 ├── prisma/
-│   ├── schema.prisma            # 10 models — customers, carts, products, offers, calls, call_turns, …
-│   └── migrations/              # 7 migrations
+│   ├── schema.prisma            # 11 models — customers, carts, products, offers, calls, call_turns, call_insights, …
+│   └── migrations/              # 10 migrations
 │
 ├── shared/contracts/
-│   └── brain-api.types.ts       # TypeScript mirror of the brain's request/response models
+│   └── brain-api.types.ts       # TypeScript mirror of the brain's request/response models (gen:types)
 │
 ├── scripts/
-│   ├── seed.ts                  # seeds the products table (the original 8)
-│   ├── seed-demo-data.ts        # full demo dataset — 43 products, customers, carts, offers
+│   ├── seed.ts                  # seeds 80 clothing variants
+│   ├── seed-demo-data.ts        # full demo dataset — chairs/proteins/clothes, customers, carts, offers
 │   ├── embed-products.py        # (re-)embed products into Pinecone
 │   ├── embed-objections.py      # embed objection examples into Pinecone
 │   ├── interactive-cli.py       # type-and-talk demo against the real brain
 │   ├── run-eval.py              # eval-suite runner (22 scenarios)
-│   └── simulate-call.ts         # end-to-end gateway simulation (no Vapi)
+│   ├── simulate-call.ts         # end-to-end gateway simulation (no Vapi)
+│   └── dev-all.sh               # full local stack launcher (bun run dev:all)
 │
 ├── docs/                        # code-walkthrough deep-dives (+ docs/history/ for archived specs)
 ├── ARCHITECTURE_STUDY.md        # the system map

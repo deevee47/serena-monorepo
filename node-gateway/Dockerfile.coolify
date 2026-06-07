@@ -1,0 +1,35 @@
+# Production image for the Bun gateway AND the BullMQ worker.
+#
+# Built from the REPO ROOT (context: .) — unlike the dev node-gateway/Dockerfile —
+# so it can read the shared Prisma schema at prisma/schema.prisma and generate the
+# JS client. The dev Dockerfile is left untouched for local `docker compose up`.
+#
+# Debian base (not alpine): the Prisma query engine needs glibc + OpenSSL, which
+# avoids a class of musl/openssl headaches on alpine.
+FROM oven/bun:1 AS base
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# 1) Install workspace deps first (Docker layer cache keyed on the manifests).
+#    All three manifests are required for bun to resolve the workspace.
+COPY package.json bun.lock ./
+COPY node-gateway/package.json ./node-gateway/
+COPY dashboard/package.json ./dashboard/
+RUN bun install --frozen-lockfile
+
+# 2) Source (node_modules / .next are excluded via .dockerignore).
+COPY . .
+
+# 3) Generate the Prisma JS client from the shared schema. `generate` does NOT
+#    touch the database, so no DATABASE_URL is needed at build time.
+RUN bunx prisma generate --generator client
+
+EXPOSE 3000
+
+# The gateway HTTP server. docker-compose.coolify.yml overrides this command for
+# the worker service (`bun node-gateway/src/workers.ts`) and the one-shot migrate
+# service (`bunx prisma migrate deploy`).
+CMD ["bun", "node-gateway/src/server.ts"]

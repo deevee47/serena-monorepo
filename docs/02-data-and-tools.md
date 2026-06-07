@@ -1,6 +1,6 @@
 # 02 — Data model + observation tools
 
-This doc covers the Postgres schema, the 5 observation tools the LLM uses to read live data instead of fabricating, and the offers system that lets the agent upsell instead of just discounting.
+This doc covers the Postgres schema, the 6 observation tools the LLM uses to read live data instead of fabricating, and the offers system that lets the agent upsell instead of just discounting.
 
 > **Mental model**: the brain is a single function-calling LLM. Every "fact" in its mouth — *"4.7 stars from 142 reviews, only 4 in stock, ships in 3 days, add the creatine for 5% off"* — comes from a tool call against Postgres. If the tool wasn't called, the agent isn't allowed to claim the fact. This is enforced in HARD_CONSTRAINTS in the prompt.
 
@@ -10,18 +10,19 @@ This doc covers the Postgres schema, the 5 observation tools the LLM uses to rea
 
 Two Prisma generators run off the same [prisma/schema.prisma](../prisma/schema.prisma): `prisma-client-js` for the Node gateway, `prisma-client-py` (asyncio) for the FastAPI brain.
 
-**Ten Prisma models.** Nine are live — `customers`, `carts`, `cart_items`, `purchases`, `products`, `product_reviews`, `offers`, `calls`, `call_turns` — three powering observation tools, one (`offers`) powering promotional behavior, the rest tracking customers and calls. The tenth, `scoring_config`, is a vestigial leftover from the rules-engine era (along with the `CallTurn.stage` / `scoreBefore` / `scoreAfter` columns) — written with placeholder values and unused by the converse pipeline. Safe to drop in a future migration.
+**Eleven Prisma models.** Ten are live — `customers`, `carts`, `cart_items`, `purchases`, `products`, `product_reviews`, `offers`, `calls`, `call_insights`, `call_turns` — most powering observation tools or promotional behavior, the rest tracking customers, calls, and the dashboard's post-call insights. The eleventh, `scoring_config`, is a vestigial leftover from the rules-engine era — written with placeholder values and unused by the converse pipeline. The rest of that era is *gone, not dormant*: the `CallTurn.stage` / `scoreBefore` / `scoreAfter` and `Call.finalScore` / `stageReached` columns were **physically dropped** in the `20260522120000` migration, so only the `scoring_config` table itself survives. Safe to drop in a future migration.
 
 ```
 customers ──┬─► carts ── cart_items ──┐
             ├─► purchases ─────────────┼──► products ──┬── product_reviews
-            └─► calls ── call_turns    │               ├── offers (× 2 FK roles)
-                                        │               └── inventory_count
+            └─► calls ──┬─ call_turns  │               ├── offers (× 2 FK roles)
+                        └─ call_insight │               └── inventory_count
+                           (1:1)        │
 ```
 
 ### Key Prisma definitions
 
-[prisma/schema.prisma:55-75](../prisma/schema.prisma#L55-L75)
+[prisma/schema.prisma:68-88](../prisma/schema.prisma#L68-L88)
 
 ```prisma
 model Customer {
@@ -49,7 +50,30 @@ model Customer {
 
 The `segment` enum is what drives the agent's tone — `FIRST_TIME` gets the trust-building variant, `VIP` gets a warmer recap, `LAPSED` gets the *"been a while"* opener. See [03-prompt-and-conversion.md](03-prompt-and-conversion.md) for how those flow into the prompt.
 
-[prisma/schema.prisma:187-215](../prisma/schema.prisma#L187-L215)
+### `Cart` — the thing the agent is calling about
+
+[prisma/schema.prisma:43-48, 90-104](../prisma/schema.prisma#L90-L104)
+
+```prisma
+enum CartStatus {
+  ACTIVE      // user is shopping right now
+  ABANDONED   // user left without checking out
+  CONVERTED   // user completed checkout (possibly via this agent)
+  DELETED     // user explicitly emptied
+}
+
+model Cart {
+  id          String     @id @default(uuid())
+  customerId  String     @map("customer_id")
+  status      CartStatus @default(ACTIVE)
+  abandonedAt DateTime?  @map("abandoned_at")
+  // ... createdAt / updatedAt, items CartItem[]
+}
+```
+
+The recovery flow targets `status = ABANDONED` carts. `abandonedAt` is the load-bearing field: `prompt_sections.format_cart` buckets it into a 5-step **freshness urgency cue** (`just now` / `~45 min ago` / `~3h ago` / `yesterday` / `4 days ago`) and renders matching tone guidance into the prompt — a cart abandoned five minutes ago gets a different opener than one cold for four days. The `@@index([status, abandonedAt])` makes the "find stale abandoned carts" scan cheap. Line items live in `cart_items` with a `priceAtAdd` snapshot so the agent quotes the price the customer actually saw.
+
+[prisma/schema.prisma:231-259](../prisma/schema.prisma#L231-L259)
 
 ```prisma
 model Product {
@@ -88,7 +112,7 @@ Notable columns:
 
 ### The `Offer` model
 
-[prisma/schema.prisma:217-241](../prisma/schema.prisma#L217-L241)
+[prisma/schema.prisma:50-53, 261-285](../prisma/schema.prisma#L261-L285)
 
 ```prisma
 enum OfferType {
@@ -125,27 +149,30 @@ model Offer {
 
 The two named relations are what let an offer be both *attached* to a primary product and *reference* a bundle product. Without the named relations, Prisma can't resolve which FK is which.
 
-### `Call` and `CallTurn` — the audit trail
+### `Call`, `CallInsight`, and `CallTurn` — the audit trail
 
-[prisma/schema.prisma:140-185](../prisma/schema.prisma#L140-L185)
+[prisma/schema.prisma:153-229](../prisma/schema.prisma#L153-L229)
 
 ```prisma
 model Call {
   id              String      @id @default(uuid())
   callId          String      @unique @map("call_id")
-  customerId      String?     @map("customer_id")
+  customerId      String?     @map("customer_id") // nullable for unknown callers
   phoneNumber     String?     @map("phone_number")
   createdAt       DateTime    @default(now()) @map("created_at")
   endedAt         DateTime?   @map("ended_at")
   durationSeconds Int?        @map("duration_seconds")
   outcome         CallOutcome?
-  finalScore      Int?        @map("final_score")
   discountGiven   Int         @default(0) @map("discount_given")
-  stageReached    String?     @map("stage_reached")
   productId       String?     @map("product_id")
+  recordingUrl        String?  @map("recording_url")
+  stereoRecordingUrl  String?  @map("stereo_recording_url")
+  providerRecordingId String?  @map("provider_recording_id")
+  voiceProvider       String?  @map("voice_provider")
 
-  customer Customer?  @relation(fields: [customerId], references: [id])
+  customer Customer?    @relation(fields: [customerId], references: [id])
   turns    CallTurn[]
+  insight  CallInsight?
 }
 
 model CallTurn {
@@ -157,17 +184,23 @@ model CallTurn {
   objectionType    String?    @map("objection_type")
   objectionSubtype String?    @map("objection_subtype")
   sentiment        Sentiment?
-  scoreBefore      Int        @map("score_before")
-  scoreAfter       Int        @map("score_after")
-  stage            String
   discountOffered  Int?       @map("discount_offered")
   // Tool attribution under the converse pipeline. Only set on AGENT turns
   // when the LLM picked a tool. Null for text-only turns and USER turns.
-  toolCalled       String?    @map("tool_called")
-  toolArgs         Json?      @map("tool_args")
-  createdAt        DateTime   @default(now()) @map("created_at")
+  toolCalled         String?  @map("tool_called")
+  toolArgs           Json?    @map("tool_args")
+  observationsCalled Json?    @map("observations_called")
+  // Turn-quality signals (20260522120000 migration). pushAttempt on AGENT
+  // turns; responseLatencyMs on USER turns; observationLatenciesMs on AGENT
+  // turns that ran observation tools.
+  pushAttempt            Int?  @map("push_attempt")
+  responseLatencyMs      Int?  @map("response_latency_ms")
+  observationLatenciesMs Json? @map("observation_latencies_ms")
+  createdAt          DateTime  @default(now()) @map("created_at")
 }
 ```
+
+Note what's *not* here anymore: the rules-engine columns `scoreBefore` / `scoreAfter` / `stage` (on `CallTurn`) and `finalScore` / `stageReached` (on `Call`) were dropped in `20260522120000` — the converse pipeline replaced the score/stage machine with a single LLM call per turn.
 
 **Outcome detection rule** — under the converse pipeline, a call is `CONVERTED` iff some `CallTurn` row has `toolCalled = 'send_whatsapp_checkout_link'`. Everything else is `DROPPED`. See [01-runtime-flow.md §8](01-runtime-flow.md) for the detection code.
 
@@ -175,15 +208,62 @@ model CallTurn {
 
 **Recent-turn signals** — those async `sentiment` + `objectionType` tags are read back on later turns by `db.service.ts:getRecentTurnSignals()` to build the sentiment-streak / repeated-objection signals the brain adapts to. See [01-runtime-flow.md §4.2](01-runtime-flow.md) and [ARCHITECTURE_STUDY.md §4.9](../ARCHITECTURE_STUDY.md).
 
+**New telephony + provider columns on `Call`** — `voiceProvider` records which adapter ran the call (the multi-provider abstraction writes it; see [ARCHITECTURE_STUDY.md §4.1.1](../ARCHITECTURE_STUDY.md)), and `recordingUrl` / `stereoRecordingUrl` / `providerRecordingId` hold the post-call recording handles. The provider columns landed in `20260520000000_telnyx_provider_columns`; the recording URLs + `observationsCalled` in `20260518100000_dashboard_support`.
+
+### `CallInsight` — the dashboard's post-call summary
+
+[prisma/schema.prisma:177-199](../prisma/schema.prisma#L177-L199)
+
+```prisma
+enum OverallSentiment {
+  POSITIVE
+  NEUTRAL
+  NEGATIVE
+  MIXED
+}
+
+enum InsightStatus {
+  PENDING
+  READY
+  FAILED
+}
+
+model CallInsight {
+  callId              String           @id @map("call_id")
+  status              InsightStatus    @default(PENDING)
+  summary             String           @default("")
+  overallSentiment    OverallSentiment @default(NEUTRAL) @map("overall_sentiment")
+  emotions            String[]         @default([])
+  sentimentTrend      String           @default("stable") @map("sentiment_trend")
+  sentimentConfidence Float            @default(0) @map("sentiment_confidence")
+  serviceConcerns     Json             @default("[]") @map("service_concerns")
+  tags                Json             @default("[]")
+  modelUsed           String?          @map("model_used")
+  fallbackUsed        Boolean          @default(false) @map("fallback_used")
+  promptTokens        Int?             @map("prompt_tokens")
+  completionTokens    Int?             @map("completion_tokens")
+  retryCount          Int              @default(0) @map("retry_count")
+  errorMessage        String?          @map("error_message")
+  generatedAt         DateTime         @default(now()) @updatedAt @map("generated_at")
+
+  call Call @relation(fields: [callId], references: [callId])
+
+  @@index([status])
+  @@map("call_insights")
+}
+```
+
+A 1:1 record keyed by `call_id` (no surrogate uuid — the `callId` IS the PK). It's written **on demand** by `POST /insights/generate`, which loads the `Call` + its turns, asks the LLM (`response_format: json_object`) for a structured `summary` / `overallSentiment` / `emotions` / `sentimentTrend` / `serviceConcerns` / `tags`, and upserts the row. `status` is the state machine the dashboard polls (`PENDING` → `READY` / `FAILED`); the `modelUsed` / `fallbackUsed` / `promptTokens` / `completionTokens` / `retryCount` columns are observability for the generation itself. See [ARCHITECTURE_STUDY.md §4.2](../ARCHITECTURE_STUDY.md) for the route. This table + both enums landed in `20260518100000_dashboard_support`.
+
 ---
 
 ## 2. Observation tools — the agent's senses
 
-Five tools live in [observations.py](../fastapi-brain/app/services/observations.py). Each one hits Postgres via Prisma-py, returns a JSON-serializable dict, and gets fed back into the LLM's conversation as a `tool` message so the next response is grounded.
+Six tools live in [observations.py](../fastapi-brain/app/services/observations.py). Each one hits Postgres via Prisma-py, returns a JSON-serializable dict, and gets fed back into the LLM's conversation as a `tool` message so the next response is grounded.
 
 The dispatcher at the bottom is what `converse_response_stream` calls when the model emits an observation tool call:
 
-[fastapi-brain/app/services/observations.py:194-208](../fastapi-brain/app/services/observations.py#L194-L208)
+[fastapi-brain/app/services/observations.py:272-288](../fastapi-brain/app/services/observations.py#L272-L288)
 
 ```python
 async def execute_observation_tool(
@@ -200,12 +280,14 @@ async def execute_observation_tool(
         return await get_delivery_eta(db, args["zip_code"], args["product_id"])
     if name == "get_available_offers":
         return await get_available_offers(db, args["product_id"])
+    if name == "list_products":
+        return await list_products(db, args.get("category"), args.get("max_results", 8))
     return {"error": f"unknown_observation_tool: {name}"}
 ```
 
 ### 2.1 `check_inventory(product_id)` — honest scarcity
 
-[fastapi-brain/app/services/observations.py:17-48](../fastapi-brain/app/services/observations.py#L17-L48)
+[fastapi-brain/app/services/observations.py:21-50](../fastapi-brain/app/services/observations.py#L21-L50)
 
 ```python
 LOW_STOCK_THRESHOLD = 10
@@ -228,7 +310,8 @@ async def check_inventory(db: Prisma, product_id: str) -> dict[str, Any]:
     low_stock = in_stock <= LOW_STOCK_THRESHOLD
     restock_eta_days: int | None = None
     if product.restockEta is not None and in_stock == 0:
-        delta = product.restockEta - datetime.utcnow()
+        # restockEta is tz-aware (timestamptz) — compare against tz-aware now.
+        delta = product.restockEta - datetime.now(UTC)
         restock_eta_days = max(0, delta.days)
 
     return {
@@ -243,11 +326,11 @@ Used when the customer asks *"how many are left?"* OR when the agent wants hones
 
 ### 2.2 `get_recent_purchases(product_id, days)` — honest social proof
 
-[fastapi-brain/app/services/observations.py:54-62](../fastapi-brain/app/services/observations.py#L54-L62)
+[fastapi-brain/app/services/observations.py:56-64](../fastapi-brain/app/services/observations.py#L56-L64)
 
 ```python
 async def get_recent_purchases(db: Prisma, product_id: str, days: int) -> dict[str, Any]:
-    since = datetime.utcnow() - timedelta(days=days)
+    since = datetime.now(UTC) - timedelta(days=days)
     count = await db.purchase.count(
         where={
             "productId": product_id,
@@ -261,24 +344,35 @@ Used to back claims like *"we shipped 47 of these in the last 30 days"*. The `pu
 
 ### 2.3 `get_review_summary(product_id)` — verbatim quotes
 
-[fastapi-brain/app/services/observations.py:68-92](../fastapi-brain/app/services/observations.py#L68-L92)
+[fastapi-brain/app/services/observations.py:70-106](../fastapi-brain/app/services/observations.py#L70-L106)
 
 ```python
 async def get_review_summary(db: Prisma, product_id: str) -> dict[str, Any]:
-    reviews = await db.productreview.find_many(
-        where={"productId": product_id},
-        order={"helpful": "desc"},
-    )
-    if not reviews:
+    # DB-side aggregation instead of loading every review into Python: a count,
+    # a grouped average, and one ordered row each for the top positive/critical
+    # quote. Four bounded queries vs. an unbounded full-table scan.
+    count = await db.productreview.count(where={"productId": product_id})
+    if not count:
         return {"product_id": product_id, "count": 0, "avg_rating": None,
                 "top_positive_quote": None, "top_critical_quote": None}
 
-    count = len(reviews)
-    avg = round(sum(r.rating for r in reviews) / count, 2)
+    grouped = await db.productreview.group_by(
+        by=["productId"],
+        where={"productId": product_id},
+        avg={"rating": True},
+    )
+    avg_raw = grouped[0]["_avg"]["rating"] if grouped else None
+    avg = round(avg_raw, 2) if avg_raw is not None else None
 
     # Top quotes: highest-helpful 4-5 star and highest-helpful <=3 star.
-    positive = next((r for r in reviews if r.rating >= 4), None)
-    critical = next((r for r in reviews if r.rating <= 3), None)
+    positive = await db.productreview.find_first(
+        where={"productId": product_id, "rating": {"gte": 4}},
+        order={"helpful": "desc"},
+    )
+    critical = await db.productreview.find_first(
+        where={"productId": product_id, "rating": {"lte": 3}},
+        order={"helpful": "desc"},
+    )
 
     return {
         "product_id": product_id,
@@ -291,13 +385,13 @@ async def get_review_summary(db: Prisma, product_id: str) -> dict[str, Any]:
     }
 ```
 
-Returns one positive + one critical quote (highest `helpful` count in each tier). The prompt rule is **quote verbatim** — the agent reads back the actual text, doesn't paraphrase.
+Returns one positive + one critical quote (highest `helpful` count in each tier). The selection moved **DB-side** — a count, a grouped average, and one ordered `find_first` per tier, instead of loading every review into Python and scanning. The prompt rule is **quote verbatim** — the agent reads back the actual text, doesn't paraphrase.
 
 **Design choice** — returning a critical review on purpose is a trust move. *"Most loved it; one buyer said the cushion compressed too fast"* — acknowledging known downsides converts more reliably than only positive cherry-picks.
 
 ### 2.4 `get_delivery_eta(zip_code, product_id)` — closing lever
 
-[fastapi-brain/app/services/observations.py:99-188](../fastapi-brain/app/services/observations.py#L99-L188)
+[fastapi-brain/app/services/observations.py:113-125, 187-212](../fastapi-brain/app/services/observations.py#L187-L212)
 
 ```python
 _ZIP_PREFIX_DAYS: list[tuple[str, int, int]] = [
@@ -321,7 +415,7 @@ async def get_delivery_eta(db: Prisma, zip_code: str, product_id: str) -> dict[s
 
 ### 2.5 `get_available_offers(product_id)` — the offers ladder data source
 
-[fastapi-brain/app/services/observations.py:117-157](../fastapi-brain/app/services/observations.py#L117-L157)
+[fastapi-brain/app/services/observations.py:131-181](../fastapi-brain/app/services/observations.py#L131-L181)
 
 ```python
 async def get_available_offers(db: Prisma, product_id: str) -> dict[str, Any]:
@@ -343,6 +437,16 @@ async def get_available_offers(db: Prisma, product_id: str) -> dict[str, Any]:
     if not offers:
         return {"product_id": product_id, "offers": []}
 
+    # Batch the bundle-product lookups into one query instead of a find_unique
+    # per BUNDLE offer (N+1).
+    bundle_ids = list(
+        {o.bundleProductId for o in offers if o.type == "BUNDLE" and o.bundleProductId}
+    )
+    bundles_by_id: dict[str, Any] = {}
+    if bundle_ids:
+        bundles = await db.product.find_many(where={"id": {"in": bundle_ids}})
+        bundles_by_id = {b.id: b for b in bundles}
+
     rendered: list[dict[str, Any]] = []
     for o in offers:
         item: dict[str, Any] = {
@@ -353,7 +457,7 @@ async def get_available_offers(db: Prisma, product_id: str) -> dict[str, Any]:
             "description": o.description,
         }
         if o.type == "BUNDLE" and o.bundleProductId:
-            bundle = await db.product.find_unique(where={"id": o.bundleProductId})
+            bundle = bundles_by_id.get(o.bundleProductId)
             if bundle:
                 item["bundle_product"] = {
                     "product_id": bundle.id,
@@ -371,7 +475,38 @@ This is what powers the agent's *"add the creatine and I can knock 5% off the wh
 
 **Why ordered by discount desc** — if multiple offers apply, the most generous one floats first. The agent picks the strongest pitch.
 
-**Why we re-fetch the bundle product** — the `Offer` row only stores the bundle product's ID; the agent needs the name + price to actually pitch it ("add the creatine for $24.99"). Two queries per call, but offers per product are small (3-5), so it's cheap.
+**Why we re-fetch the bundle product** — the `Offer` row only stores the bundle product's ID; the agent needs the name + price to actually pitch it ("add the creatine for $24.99"). The bundle lookups are **batched into one `find_many`** keyed by the distinct `bundleProductId` set, so the whole tool is two queries (offers + bundles) regardless of how many BUNDLE offers come back — no per-offer N+1.
+
+### 2.6 `list_products(category?, max_results)` — catalog browse
+
+[fastapi-brain/app/services/observations.py:218-266](../fastapi-brain/app/services/observations.py#L218-L266)
+
+```python
+async def list_products(
+    db: Prisma, category: str | None = None, max_results: int = 8
+) -> dict[str, Any]:
+    """Catalog-browse helper for "what else do you have?" questions."""
+    rows = await db.product.find_many(where={"isActive": True})
+
+    # Category counts across the full active catalog.
+    counts: dict[str, int] = {}
+    for r in rows:
+        key = r.category or "(uncategorized)"
+        counts[key] = counts.get(key, 0) + 1
+    # ... sort categories by count desc, filter to `category` (case-insensitive),
+    #     order filtered rows by (category asc, price asc), slice to max_results
+    return {
+        "categories": categories,    # [{name, count}]
+        "products": products,        # [{product_id, name, price, category}]
+        "total_active": len(rows),
+        "filtered_total": len(filtered),
+        "category_filter": category,
+    }
+```
+
+The newest observation tool. It answers the broad *"what else do you have?"* / *"do you carry any protein?"* questions — returns a category summary plus a small (`max_results`, default 8, capped at 20) product list. One `find_many` over the small active-products table; counts and ordering happen in Python. `category` is a soft, **case-insensitive** filter so the LLM can pass `"office"` / `"Office"` / `"OFFICE"` and still match.
+
+**Why it's NOT the pivot tool** — the tool description is emphatic that `list_products` is for browsing, not for the price-objection pivot. The prompt already hands the agent the `ALTERNATIVE PRODUCT` / `PREMIUM ALTERNATIVE` for the current category (the Pinecone lookups in §6), so the agent never burns a tool round-trip just to find a cheaper alt. And the description tells it to **summarize, not read the list verbatim** — *"yeah, we've got chairs, proteins, and a few apparel pieces — anything in particular?"*
 
 ---
 
@@ -379,7 +514,7 @@ This is what powers the agent's *"add the creatine and I can knock 5% off the wh
 
 The observation-tool loop in [llm.py](../fastapi-brain/app/services/llm.py) is the magic that lets the LLM ground its responses in real data. Walkthrough below.
 
-[fastapi-brain/app/services/llm.py:160-289](../fastapi-brain/app/services/llm.py#L160-L289)
+[fastapi-brain/app/services/llm.py:176-305](../fastapi-brain/app/services/llm.py#L176-L305)
 
 When the LLM emits a tool call:
 
@@ -422,9 +557,15 @@ if observation_calls and run_observation_tool is not None and tool_turn < MAX_TO
         ],
     })
 
-    # 2) Execute observation tools and append tool result messages.
+    # 2) Emit a thinking event per tool (so the gateway can fill dead air),
+    #    then run the DB roundtrips CONCURRENTLY — each await is audible
+    #    latency on a live call and the reads are independent.
     for c in observation_calls:
-        result = await run_observation_tool(c["name"], c["args"])
+        yield {"type": "thinking", "tool": c["name"]}
+
+    results = await asyncio.gather(*(_run_observation(c) for c in observation_calls))
+
+    for c, result in zip(observation_calls, results):
         yield {"type": "observation", "name": c["name"], "args": c["args"], "result": result}
         working_messages.append({
             "role": "tool",
@@ -436,7 +577,7 @@ if observation_calls and run_observation_tool is not None and tool_turn < MAX_TO
     continue
 ```
 
-The LLM sees the result, then re-streams its response with the data baked in. This loop is bounded by `MAX_TOOL_TURNS = 4` ([llm.py:62](../fastapi-brain/app/services/llm.py#L62)) so a misbehaving model can't spin forever.
+The LLM sees the result, then re-streams its response with the data baked in. The observation tools run **concurrently** via `asyncio.gather` — each await is audible latency on a live call, and the reads are independent, so a multi-tool turn (e.g. inventory + reviews together) pays one round-trip, not two. `_run_observation` wraps each call in a try/except so one failed tool returns `{"error": "tool_execution_failed"}` instead of taking the whole turn down. The loop is bounded by `MAX_TOOL_TURNS = 4` ([llm.py:63](../fastapi-brain/app/services/llm.py#L63)) so a misbehaving model can't spin forever.
 
 **Side-effect tools** (`send_whatsapp_*`) skip the loop — they emit a `tool_call` SSE event that bubbles up to the gateway, which dispatches them out-of-band. The agent's last text utterance ("Sending it to your WhatsApp now") was streamed BEFORE the tool call, so by the time the customer hears that line, the WhatsApp request is already in flight.
 
@@ -444,7 +585,7 @@ The LLM sees the result, then re-streams its response with the data baked in. Th
 
 ## 4. Tool registration — Pydantic schemas → OpenAI tool definitions
 
-The LLM only knows about tools that are in `OPENAI_TOOLS` ([tools.py](../fastapi-brain/app/services/tools.py)). Each tool is described by a Pydantic model whose `.model_json_schema()` becomes the JSON schema OpenAI sees.
+The LLM only knows about tools that are in `OPENAI_TOOLS` ([tools.py](../fastapi-brain/app/services/tools.py)) — **8 in total**, split into two sets: `SIDE_EFFECT_TOOLS` (2: `send_whatsapp_checkout_link`, `send_whatsapp_product_info`) and `OBSERVATION_TOOLS` (6: the five above plus `list_products`). `TOOL_ARG_MODELS` maps each tool name to its Pydantic args model; the `ToolName` `Literal` and these two sets are the single source of truth `llm.py` imports so routing never drifts. Each tool is described by a Pydantic model whose `.model_json_schema()` becomes the JSON schema OpenAI sees.
 
 [fastapi-brain/app/services/tools.py:33-44](../fastapi-brain/app/services/tools.py#L33-L44)
 
@@ -462,11 +603,11 @@ class SendCheckoutLinkArgs(BaseModel):
     )
 ```
 
-`Field(ge=0, le=10)` is **layer 1 of the discount defense-in-depth**. The `description` is what the LLM reads to decide WHEN to use which discount.
+`Field(ge=0, le=10)` (with `MAX_DISCOUNT_PERCENT = 10`) is **layer 1 of the discount defense-in-depth**. The `description` is what the LLM reads to decide WHEN to use which discount. The enforcement happens in `parse_tool_call(name, raw_args)`, which re-validates the LLM's returned args against the registered Pydantic model — a `discount_percent=15` raises `ValidationError` rather than reaching the gateway, so a jailbroken model can't talk its way past the cap.
 
 Tool definitions get assembled into the OpenAI payload:
 
-[fastapi-brain/app/services/tools.py:106-125](../fastapi-brain/app/services/tools.py#L106-L125)
+[fastapi-brain/app/services/tools.py:139-155](../fastapi-brain/app/services/tools.py#L139-L155)
 
 ```python
 OPENAI_TOOLS: list[dict[str, Any]] = [
@@ -486,13 +627,13 @@ OPENAI_TOOLS: list[dict[str, Any]] = [
             "parameters": SendCheckoutLinkArgs.model_json_schema(),
         },
     },
-    # ... 6 more tools
+    # ... 7 more tools (8 total: 2 side-effect + 6 observation)
 ]
 ```
 
 Each tool's `description` doubles as **prompt engineering** — it tells the LLM precisely when to use the tool. The `get_available_offers` description is particularly explicit:
 
-[fastapi-brain/app/services/tools.py:180-198](../fastapi-brain/app/services/tools.py#L180-L198)
+[fastapi-brain/app/services/tools.py:226-244](../fastapi-brain/app/services/tools.py#L226-L244)
 
 ```python
 {
@@ -522,7 +663,7 @@ The "CALL THIS BEFORE..." line is doing real work — it's what shifts the agent
 
 ## 5. The seed pipeline
 
-[scripts/seed-demo-data.ts](../scripts/seed-demo-data.ts) is a single ~1300-line script that's idempotent (re-runnable). It seeds:
+[scripts/seed-demo-data.ts](../scripts/seed-demo-data.ts) is a single ~1400-line script that's idempotent (re-runnable). It seeds:
 
 | What | Count | Notes |
 |---|---|---|
@@ -531,11 +672,11 @@ The "CALL THIS BEFORE..." line is doing real work — it's what shifts the agent
 | Customers | 10 | Spans all 4 segments (FIRST_TIME, RETURNING, VIP, LAPSED) |
 | Carts (abandoned) | 10 | One per customer, varying staleness via `abandonedAt` |
 | Past purchases | 20 | Drives the `Customer.lifetimeValue` calculation + cross-sell signals |
-| Offers | 26 | BUNDLE (protein × creatine, chair × mat, hoodie × joggers per matching size) and QUANTITY (2× protein, 2× tee per size) |
+| Offers | 17 | 13 BUNDLE (protein × creatine, chair × mat, hoodie × joggers per matching size) + 4 QUANTITY (2× protein, 2× tee per size). Offers whose referenced products aren't in the seed are skipped, not errored |
 
 **The most architecturally interesting bit** is the protein generator. Real-world per-100g amino-acid profiles for each protein type drive a generator that scales to actual scoop sizes.
 
-[scripts/seed-demo-data.ts:251-285](../scripts/seed-demo-data.ts#L251-L285)
+[scripts/seed-demo-data.ts:283-318](../scripts/seed-demo-data.ts#L283-L318)
 
 ```typescript
 const PROTEIN_PROFILES: Record<ProteinType, ProteinProfile> = {
@@ -580,7 +721,7 @@ The full nutrition + amino acid breakdown gets stored in `Product.metadata` json
 
 Two indexes:
 
-- **`voice-agent-products`** (dim=1536, cosine) — embeds product `name + description + tags` via OpenAI's `text-embedding-3-small`. Powers `/products/alternatives` (the cheaper-alt and premium-alt lookups in §1).
+- **`voice-agent-products`** (dim=1536, cosine) — embeds product `name + description + tags` via OpenAI's `text-embedding-3-small`. Powers `/products/alternatives` (the cheaper-alt and premium-alt lookups below in this section).
 - **`voice-agent-objections`** — labeled utterance examples for the hybrid classifier. Used only by the analytics-only classifier path.
 
 [scripts/embed-products.py](../scripts/embed-products.py) is the seed script. It **wipes the product index before re-upserting** to avoid stale entries from prior demo state polluting the search:
@@ -598,7 +739,7 @@ except Exception as exc:
 
 The cheaper-alternative search filters by `category` to prevent the *"chair → hoodie"* failure mode that surfaced earlier:
 
-[fastapi-brain/app/services/product.py:50-90](../fastapi-brain/app/services/product.py#L50-L90)
+[fastapi-brain/app/services/product.py:67-94](../fastapi-brain/app/services/product.py#L67-L94)
 
 ```python
 async def find_cheaper_alternative(
@@ -641,9 +782,9 @@ The `find_alternatives` variant (used for premium anchoring) takes a `min_price`
 Reading order if you're studying this:
 
 1. Schema first: open [prisma/schema.prisma](../prisma/schema.prisma) and skim every model
-2. Then [observations.py](../fastapi-brain/app/services/observations.py) end-to-end (it's only 208 lines)
-3. Then [tools.py](../fastapi-brain/app/services/tools.py) to see how each observation gets exposed to the LLM
-4. Then `_stream_one_pass` in [llm.py](../fastapi-brain/app/services/llm.py) to see how the loop works
+2. Then [observations.py](../fastapi-brain/app/services/observations.py) end-to-end (it's only ~290 lines)
+3. Then [tools.py](../fastapi-brain/app/services/tools.py) to see how each of the 8 tools gets exposed to the LLM
+4. Then `converse_response_stream` in [llm.py](../fastapi-brain/app/services/llm.py) to see how the observation loop works
 5. Finally [seed-demo-data.ts](../scripts/seed-demo-data.ts) to see how realistic test data gets generated
 
 Continue to **[03-prompt-and-conversion.md](03-prompt-and-conversion.md)** for the system prompt + sales principles that drive when each tool gets called.

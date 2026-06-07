@@ -2,9 +2,22 @@
 .github
 .claude
 .env
+.env.*
+# node deps + build output at every level (root-context builds COPY . .)
 node_modules
+**/node_modules
+**/.next
+**/dist
+**/.turbo
+# python
 **/__pycache__
 **/.pytest_cache
 **/*.pyc
+**/.mypy_cache
+**/.ruff_cache
 fastapi-brain/.venv
 fastapi-brain/tests
+# misc
+eval-results
+**/*.log
+**/.DS_Store

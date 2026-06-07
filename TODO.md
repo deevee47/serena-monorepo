@@ -88,5 +88,5 @@ The provider abstraction, normalized webhook handling, opener service, integrati
 These are dev-mode aids that should be removed or quieted before prod:
 
 - `TELNYX_INSECURE_DEV=1` env var — bypasses Ed25519 verification + dumps headers/body of every webhook and LLM POST. See `telnyx-provider.ts::verifyWebhook` and the conditional `logger.warn` blocks in `webhook.ts` + `llm.ts`.
-- `parseLlmEnvelope` checks five header names and four body field locations for `call_control_id`. Once we observe Telnyx's actual envelope in the wild, narrow this back to the canonical 1-2 paths — see `telnyx-provider.ts::parseLlmEnvelope`.
+- `parseLlmEnvelope` checks three header names and eight body locations for `call_control_id` (five top-level fields + three `extra_metadata`/`metadata` keys). Once we observe Telnyx's actual envelope in the wild, narrow this back to the canonical 1-2 paths — see `telnyx-provider.ts::parseLlmEnvelope`.
 - `header_keys` logging on webhook-auth failure. Useful while debugging Telnyx header naming; remove once signature verification is solid.
