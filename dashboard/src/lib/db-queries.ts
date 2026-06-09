@@ -1,4 +1,5 @@
 import { prisma } from './prisma';
+import { deriveDefaultCallName } from './utils';
 
 export interface OverviewStats {
   callsToday: number;
@@ -277,6 +278,10 @@ export interface CallListItem {
   productId: string | null;
   phoneNumber: string | null;
   customerName: string | null;
+  /** User-set call label; null when never renamed (show `defaultName`). */
+  name: string | null;
+  /** Derived "{product} — {date}" shown when `name` is null. */
+  defaultName: string;
   /** Serena tracks discount as an integer percentage on the Call row.
    *  Surfaced like "5%" in the calls table; null when the agent never
    *  offered one. */
@@ -306,6 +311,7 @@ export async function loadCallList(filters: CallListFilters = {}): Promise<CallL
             OR: [
               { callId: { contains: filters.q, mode: 'insensitive' } },
               { phoneNumber: { contains: filters.q, mode: 'insensitive' } },
+              { name: { contains: filters.q, mode: 'insensitive' } },
               {
                 customer: {
                   OR: [
@@ -326,19 +332,40 @@ export async function loadCallList(filters: CallListFilters = {}): Promise<CallL
       _count: { select: { turns: true } },
     },
   });
-  return rows.map((r) => ({
-    callId: r.callId,
-    createdAt: r.createdAt,
-    endedAt: r.endedAt,
-    durationSeconds: r.durationSeconds,
-    outcome: r.outcome,
-    productId: r.productId,
-    phoneNumber: r.phoneNumber,
-    customerName: r.customer?.name ?? null,
-    discountGiven: r.discountGiven,
-    turnCount: r._count.turns,
-    voiceProvider: r.voiceProvider,
-  }));
+
+  // Resolve product names for the derived default label. Call.productId is a
+  // plain string (no FK), so one batched lookup over the page's products.
+  const productIds = [
+    ...new Set(rows.map((r) => r.productId).filter((id): id is string => Boolean(id))),
+  ];
+  const products = productIds.length
+    ? await prisma.product.findMany({
+        where: { id: { in: productIds } },
+        select: { id: true, name: true },
+      })
+    : [];
+  const productNameById = new Map(products.map((p) => [p.id, p.name]));
+
+  return rows.map((r) => {
+    const productLabel = r.productId
+      ? (productNameById.get(r.productId) ?? r.productId)
+      : null;
+    return {
+      callId: r.callId,
+      createdAt: r.createdAt,
+      endedAt: r.endedAt,
+      durationSeconds: r.durationSeconds,
+      outcome: r.outcome,
+      productId: r.productId,
+      phoneNumber: r.phoneNumber,
+      customerName: r.customer?.name ?? null,
+      name: r.name,
+      defaultName: deriveDefaultCallName(productLabel, r.createdAt),
+      discountGiven: r.discountGiven,
+      turnCount: r._count.turns,
+      voiceProvider: r.voiceProvider,
+    };
+  });
 }
 
 export async function loadCallDetail(callId: string) {
@@ -350,6 +377,16 @@ export async function loadCallDetail(callId: string) {
       insight: true,
     },
   });
+}
+
+/** Product display name for a productId (null if none / not found). */
+export async function loadProductName(productId: string | null): Promise<string | null> {
+  if (!productId) return null;
+  const p = await prisma.product.findUnique({
+    where: { id: productId },
+    select: { name: true },
+  });
+  return p?.name ?? productId;
 }
 
 export async function loadActiveCalls() {

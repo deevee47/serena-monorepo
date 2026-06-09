@@ -362,7 +362,16 @@ async function llmCompletionsHandler(request: FastifyRequest, reply: FastifyRepl
             ),
         );
       }
-      await Promise.allSettled(signalLookups);
+      // Bound the wait: these lookups feed the prompt but must NOT add dead-air
+      // before the brain even starts streaming. A warm cache (product.service's
+      // memo) resolves instantly; a COLD Pinecone alt-lookup can take seconds,
+      // so we race against a short budget and proceed without it on a miss — the
+      // lookup still finishes in the background and is cached for the next turn.
+      const SIGNAL_LOOKUP_BUDGET_MS = 1500;
+      await Promise.race([
+        Promise.allSettled(signalLookups),
+        new Promise((resolve) => setTimeout(resolve, SIGNAL_LOOKUP_BUDGET_MS)),
+      ]);
 
       // Layer session-derived signals onto whatever the DB-derived snapshot
       // gave us. The DB only knows about persisted USER turns, so:

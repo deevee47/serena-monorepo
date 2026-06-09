@@ -13,8 +13,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ToolTimeline, buildToolTimeline } from '@/components/tool-timeline';
 import type { ServiceConcern } from '@/components/insight-concerns-card';
 import type { InsightTag } from '@/components/insight-tags-card';
-import { loadCallDetail } from '@/lib/db-queries';
-import { formatRelative } from '@/lib/utils';
+import { CallNameEditor } from '@/components/call-name-editor';
+import { loadCallDetail, loadProductName } from '@/lib/db-queries';
+import { deriveDefaultCallName, formatRelative } from '@/lib/utils';
 
 export const dynamic = 'force-dynamic';
 
@@ -38,6 +39,11 @@ export default async function CallDetailPage({
   })();
   const call = await loadCallDetail(callId);
   if (!call) notFound();
+
+  const defaultName = deriveDefaultCallName(
+    await loadProductName(call.productId),
+    call.createdAt,
+  );
 
   const inFlight = call.endedAt === null;
 
@@ -134,6 +140,16 @@ export default async function CallDetailPage({
           </div>
         }
       />
+
+      {/* Editable call name — the rename affordance on the detail view. */}
+      <div className="border-b bg-background px-4 py-2">
+        <CallNameEditor
+          callId={callId}
+          name={call.name}
+          defaultName={defaultName}
+          variant="heading"
+        />
+      </div>
 
       {/* ── Cockpit body ─────────────────────────────────────────────────
           Left rail (~38%) holds compressed meta — KPI strip + collapsible

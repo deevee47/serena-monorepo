@@ -10,6 +10,7 @@ import {
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
+import { CallNameEditor } from '@/components/call-name-editor';
 import { OutcomeBadge } from '@/components/outcome-badge';
 import { PlatformBadge } from '@/components/platform-badge';
 import { PageHeader } from '@/components/page-header';
@@ -152,6 +153,7 @@ export default async function CallsPage({
               <TableHeader>
                 <TableRow>
                   <TableHead>When</TableHead>
+                  <TableHead>Name</TableHead>
                   <TableHead>Customer</TableHead>
                   <TableHead>Product</TableHead>
                   <TableHead>Platform</TableHead>
@@ -164,7 +166,7 @@ export default async function CallsPage({
               <TableBody>
                 {calls.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={8} className="text-center text-muted-foreground">
+                    <TableCell colSpan={9} className="text-center text-muted-foreground">
                       No calls match these filters.
                     </TableCell>
                   </TableRow>
@@ -178,6 +180,13 @@ export default async function CallsPage({
                         >
                           {formatRelative(call.createdAt)}
                         </Link>
+                      </TableCell>
+                      <TableCell className="min-w-44 max-w-64">
+                        <CallNameEditor
+                          callId={call.callId}
+                          name={call.name}
+                          defaultName={call.defaultName}
+                        />
                       </TableCell>
                       <TableCell>
                         {call.customerName ?? call.phoneNumber ?? 'Anonymous'}

@@ -235,8 +235,22 @@ export default async function callsRoutes(app: FastifyInstance) {
 
     const row = await prisma.call.findUnique({
       where: { callId: id },
-      select: { recordingUrl: true, stereoRecordingUrl: true, providerRecordingId: true },
+      select: {
+        recordingUrl: true,
+        stereoRecordingUrl: true,
+        providerRecordingId: true,
+        voiceProvider: true,
+      },
     });
+
+    // Fetch from the provider that ACTUALLY ran this call — NOT the global
+    // VOICE_PROVIDER default. A Vapi call's recording lives at Vapi even when
+    // the gateway's default is Telnyx (and vice-versa); using the default here
+    // asks the wrong provider for the id and gets null back.
+    const callProvider =
+      row?.voiceProvider === 'vapi' || row?.voiceProvider === 'telnyx'
+        ? getVoiceProvider(row.voiceProvider)
+        : voiceProvider();
 
     // Always fetch fresh from the provider. Telnyx's recording URLs are
     // presigned S3 links with a ~10min expiry, so caching the URL in
@@ -246,7 +260,7 @@ export default async function callsRoutes(app: FastifyInstance) {
     // singular endpoint instead.
     const lookupId = row?.providerRecordingId ?? id;
     try {
-      const recording = await voiceProvider().getCall(lookupId);
+      const recording = await callProvider.getCall(lookupId);
       // Persist the recording_id when we discover one — turns a v3:...
       // call_control_id lookup into a UUID lookup on the next request.
       if (recording.recordingId && recording.recordingId !== row?.providerRecordingId) {

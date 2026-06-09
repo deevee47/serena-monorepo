@@ -155,6 +155,7 @@ model Call {
   callId          String      @unique @map("call_id")
   customerId      String?     @map("customer_id") // nullable for unknown callers
   phoneNumber     String?     @map("phone_number")
+  name            String?     // user-set call label; null → derived "{product} — {date}" in the UI
   createdAt       DateTime    @default(now()) @map("created_at")
   endedAt         DateTime?   @map("ended_at")
   durationSeconds Int?        @map("duration_seconds")

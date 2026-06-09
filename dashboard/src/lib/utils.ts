@@ -27,6 +27,26 @@ export function formatDuration(seconds: number | null | undefined): string {
   return `${m}m ${s}s`;
 }
 
+/** "Jun 9" — short month + day, for derived call names. */
+export function formatShortDate(date: Date | string | null | undefined): string {
+  if (!date) return '';
+  const d = typeof date === 'string' ? new Date(date) : date;
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+/**
+ * The default label shown for a call that hasn't been renamed:
+ * "{product} — {Mon D}" (falls back to the raw productId, then "Call").
+ */
+export function deriveDefaultCallName(
+  productName: string | null | undefined,
+  createdAt: Date | string | null | undefined,
+): string {
+  const label = (productName ?? '').trim() || 'Call';
+  const date = formatShortDate(createdAt);
+  return date ? `${label} — ${date}` : label;
+}
+
 export function formatCurrency(value: number | null | undefined, currency = 'USD'): string {
   if (value == null) return '—';
   return new Intl.NumberFormat('en-US', {
