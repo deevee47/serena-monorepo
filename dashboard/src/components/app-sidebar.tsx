@@ -30,11 +30,11 @@ import {
 } from '@/components/ui/sidebar';
 
 const CALL_NAV = [
-  { href: '/', label: 'Overview', icon: SquaresFour },
-  { href: '/calls', label: 'Calls', icon: Phone },
-  { href: '/live', label: 'Live', icon: Broadcast },
-  { href: '/trigger', label: 'Trigger call', icon: PhoneOutgoing },
+  { href: '/', label: 'Telemetry', icon: SquaresFour },
+  { href: '/live', label: 'Ongoing Calls', icon: Broadcast },
+  { href: '/calls', label: 'Calls History', icon: Phone },
   { href: '/talk', label: 'Talk to agent', icon: Microphone },
+  { href: '/trigger', label: 'Trigger Phone Call', icon: PhoneOutgoing },
 ];
 
 const CONTENT_NAV = [

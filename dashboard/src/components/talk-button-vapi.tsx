@@ -13,10 +13,13 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { LiveTail } from '@/components/live-tail';
 import { cn } from '@/lib/utils';
-import { fetchOpenerAction } from '@/app/(app)/talk/opener-action';
+import { fetchOpenerAction, bindWebCallContextAction } from '@/app/(app)/talk/opener-action';
 
 type Status = 'idle' | 'connecting' | 'live' | 'ending' | 'error';
 type CallMode = 'INBOUND_PRESALES' | 'OUTBOUND_RECOVERY';
+type Language = 'en' | 'hi';
+
+const LANGUAGE_LABEL: Record<Language, string> = { en: 'English', hi: 'हिन्दी' };
 
 interface ProductOption {
   id: string;
@@ -53,9 +56,11 @@ export function TalkButtonVapi({
 
   const [mode, setMode] = useState<CallMode>('OUTBOUND_RECOVERY');
   const [productId, setProductId] = useState<string>(products[0]?.id ?? '');
+  const [language, setLanguage] = useState<Language>('en');
 
   const [activeMode, setActiveMode] = useState<CallMode | null>(null);
   const [activeProductId, setActiveProductId] = useState<string | null>(null);
+  const [activeLanguage, setActiveLanguage] = useState<Language | null>(null);
 
   const vapi = useMemo(() => {
     if (typeof window === 'undefined') return null;
@@ -78,6 +83,7 @@ export function TalkButtonVapi({
       setMuted(false);
       setActiveMode(null);
       setActiveProductId(null);
+      setActiveLanguage(null);
     };
     const onError = (err: unknown) => {
       setStatus('error');
@@ -112,14 +118,17 @@ export function TalkButtonVapi({
       mode === 'OUTBOUND_RECOVERY' ? productId : productId || products[0]?.id || '';
     setActiveMode(mode);
     setActiveProductId(effectiveProductId || null);
+    setActiveLanguage(language);
 
     try {
       // Opener is generated server-side so both providers (and any future
-      // caller) use the same weighted pool.
+      // caller) use the same weighted pool. `language` picks which language the
+      // agent OPENS in; runtime turns still follow the customer's own language.
       const opener =
         (await fetchOpenerAction({
           mode,
           product_id: effectiveProductId || null,
+          language,
         })) ?? FALLBACK_OPENER;
 
       const call = await vapi.start(assistantId, {
@@ -128,16 +137,41 @@ export function TalkButtonVapi({
         metadata: {
           product_id: effectiveProductId,
           call_mode: mode,
+          language,
+        },
+        // Smart endpointing so natural mid-sentence pauses ("...because,
+        // <pause> it was too expensive") don't get treated as end-of-turn and
+        // sent to the LLM as separate fragments. Web calls use the assistant's
+        // dashboard config by default (our gateway pacing overrides only apply
+        // to PSTN), so we set it here too. `vapi` provider = multilingual
+        // (Hindi/Hinglish); keep in sync with node-gateway ASSISTANT_PACING.
+        startSpeakingPlan: {
+          waitSeconds: 0.8,
+          smartEndpointingPlan: { provider: 'vapi' },
         },
       });
       if (call?.id) setCallId(call.id);
+
+      // Bind the selected product to this call server-side. Vapi does not
+      // reliably forward web-call metadata to our Custom LLM endpoint, so
+      // without this the gateway can't tell which product the caller picked
+      // and falls back to the default — the agent would open about one product
+      // (client-rendered opener) but answer about another. The gateway reads
+      // this binding first when it lazily creates the session on turn 1.
+      if (call?.id) {
+        void bindWebCallContextAction({
+          call_id: call.id,
+          product_id: effectiveProductId || null,
+        });
+      }
     } catch (err) {
       setStatus('error');
       setErrorMsg(err instanceof Error ? err.message : 'Failed to start call');
       setActiveMode(null);
       setActiveProductId(null);
+      setActiveLanguage(null);
     }
-  }, [vapi, assistantId, mode, productId, products]);
+  }, [vapi, assistantId, mode, productId, products, language]);
 
   const stop = useCallback(async () => {
     if (!vapi) return;
@@ -176,6 +210,7 @@ export function TalkButtonVapi({
                 </Badge>
               ) : null}
               {activeProduct ? <Badge variant="outline">{productLabel(activeProduct)}</Badge> : null}
+              {activeLanguage ? <Badge variant="outline">{LANGUAGE_LABEL[activeLanguage]}</Badge> : null}
               {muted ? <Badge variant="outline">Muted</Badge> : null}
             </div>
             <div className="flex items-center gap-2">
@@ -305,6 +340,36 @@ export function TalkButtonVapi({
               {outbound
                 ? 'The product Sera assumes the caller abandoned. Drives the opener.'
                 : 'Inbound starts agnostic — leave on default unless you want to bias the greeting.'}
+            </p>
+          </div>
+
+          <div>
+            <div className="mb-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              Language
+            </div>
+            <div className="grid grid-cols-2 border">
+              {(['en', 'hi'] as const).map((lng, i) => (
+                <button
+                  key={lng}
+                  type="button"
+                  onClick={() => setLanguage(lng)}
+                  className={cn(
+                    'px-3 py-2 text-sm font-medium transition-colors',
+                    i === 0 && 'border-r',
+                    language === lng
+                      ? 'bg-ff-orange text-white'
+                      : 'bg-transparent text-muted-foreground hover:text-foreground',
+                  )}
+                >
+                  {LANGUAGE_LABEL[lng]}
+                </button>
+              ))}
+            </div>
+            <p className="mt-2 text-xs text-muted-foreground">
+              Sera is bilingual — English and Hindi.{' '}
+              {language === 'hi'
+                ? 'She’ll open in Hindi from the very first message, and switch to English if you reply in English.'
+                : 'She’ll open in English, and switch to Hindi if you reply in Hindi.'}
             </p>
           </div>
         </CardContent>

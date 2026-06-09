@@ -47,6 +47,9 @@ async function resolveBridgeCallId(uuid: string, signal: AbortSignal): Promise<s
 
 type Status = 'idle' | 'connecting' | 'live' | 'ending' | 'error';
 type CallMode = 'INBOUND_PRESALES' | 'OUTBOUND_RECOVERY';
+type Language = 'en' | 'hi';
+
+const LANGUAGE_LABEL: Record<Language, string> = { en: 'English', hi: 'हिन्दी' };
 
 interface ProductOption {
   id: string;
@@ -90,8 +93,10 @@ export function TalkButtonTelnyx(props: TalkButtonTelnyxProps) {
 
   const [mode, setMode] = useState<CallMode>('OUTBOUND_RECOVERY');
   const [productId, setProductId] = useState<string>(products[0]?.id ?? '');
+  const [language, setLanguage] = useState<Language>('en');
   const [activeMode, setActiveMode] = useState<CallMode | null>(null);
   const [activeProductId, setActiveProductId] = useState<string | null>(null);
+  const [activeLanguage, setActiveLanguage] = useState<Language | null>(null);
   // Canonical Telnyx call ID, resolved via the gateway's bridge map. Null
   // until the first LLM turn lands and writes `web_call_bridge:<uuid>`.
   const [resolvedCallId, setResolvedCallId] = useState<string | null>(null);
@@ -177,6 +182,7 @@ export function TalkButtonTelnyx(props: TalkButtonTelnyxProps) {
         setMuted(false);
         setActiveMode(null);
         setActiveProductId(null);
+        setActiveLanguage(null);
         setResolvedCallId(null);
         bridgePollAbort.current?.abort();
         bridgePollAbort.current = null;
@@ -220,6 +226,7 @@ export function TalkButtonTelnyx(props: TalkButtonTelnyxProps) {
       mode === 'OUTBOUND_RECOVERY' ? productId : productId || products[0]?.id || '';
     setActiveMode(mode);
     setActiveProductId(effectiveProductId || null);
+    setActiveLanguage(language);
 
     const offer = effectiveProductId ? offersByProduct[effectiveProductId] : null;
     const bridgeUuid = crypto.randomUUID();
@@ -235,6 +242,11 @@ export function TalkButtonTelnyx(props: TalkButtonTelnyxProps) {
         customHeaders: [
           { name: 'X-Call-Mode', value: mode },
           { name: 'X-Product-Id', value: effectiveProductId || '' },
+          // Maps to {{language}} in the Telnyx assistant. Unlike Vapi (where we
+          // pass the opener text directly as firstMessage), Telnyx speaks its
+          // own configured greeting — so the assistant's greeting/prompt must
+          // reference {{language}} for it to open in the chosen language.
+          { name: 'X-Language', value: language },
           { name: 'X-Bridge-UUID', value: bridgeUuid },
           ...(offer
             ? [
@@ -262,8 +274,9 @@ export function TalkButtonTelnyx(props: TalkButtonTelnyxProps) {
       setErrorMsg(err instanceof Error ? err.message : 'Failed to start call');
       setActiveMode(null);
       setActiveProductId(null);
+      setActiveLanguage(null);
     }
-  }, [ready, mode, productId, products, offersByProduct]);
+  }, [ready, mode, productId, products, offersByProduct, language]);
 
   const stop = useCallback(async () => {
     const agent = agentRef.current;
@@ -313,6 +326,7 @@ export function TalkButtonTelnyx(props: TalkButtonTelnyxProps) {
                 </Badge>
               ) : null}
               {activeProduct ? <Badge variant="outline">{productLabel(activeProduct)}</Badge> : null}
+              {activeLanguage ? <Badge variant="outline">{LANGUAGE_LABEL[activeLanguage]}</Badge> : null}
               {muted ? <Badge variant="outline">Muted</Badge> : null}
             </div>
             <div className="flex items-center gap-2">
@@ -450,6 +464,36 @@ export function TalkButtonTelnyx(props: TalkButtonTelnyxProps) {
               {outbound
                 ? 'The product Sera assumes the caller abandoned. Drives the opener.'
                 : 'Inbound starts agnostic — leave on default unless you want to bias the greeting.'}
+            </p>
+          </div>
+
+          <div>
+            <div className="mb-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              Language
+            </div>
+            <div className="grid grid-cols-2 border">
+              {(['en', 'hi'] as const).map((lng, i) => (
+                <button
+                  key={lng}
+                  type="button"
+                  onClick={() => setLanguage(lng)}
+                  className={cn(
+                    'px-3 py-2 text-sm font-medium transition-colors',
+                    i === 0 && 'border-r',
+                    language === lng
+                      ? 'bg-ff-orange text-white'
+                      : 'bg-transparent text-muted-foreground hover:text-foreground',
+                  )}
+                >
+                  {LANGUAGE_LABEL[lng]}
+                </button>
+              ))}
+            </div>
+            <p className="mt-2 text-xs text-muted-foreground">
+              Sera is bilingual — English and Hindi.{' '}
+              {language === 'hi'
+                ? 'She’ll open in Hindi from the very first message, and switch to English if you reply in English.'
+                : 'She’ll open in English, and switch to Hindi if you reply in Hindi.'}
             </p>
           </div>
         </CardContent>

@@ -15,17 +15,28 @@ import type {
   WebhookVerification,
 } from './types.js';
 
-/** Sales pacing — beats Vapi defaults for our use case. */
-const ASSISTANT_PACING: Pick<
+/** Sales pacing — beats Vapi defaults for our use case. Keep the endpointing
+ *  config here in sync with the web path in
+ *  `dashboard/src/components/talk-button-vapi.tsx` (web calls don't go through
+ *  this adapter, so they can't share the object). */
+export const ASSISTANT_PACING: Pick<
   VapiAssistantOverrides,
   | 'silenceTimeoutSeconds'
-  | 'responseDelaySeconds'
+  | 'startSpeakingPlan'
   | 'numWordsToInterruptAssistant'
   | 'backchannelingEnabled'
   | 'endCallPhrases'
 > = {
   silenceTimeoutSeconds: 12,
-  responseDelaySeconds: 0.4,
+  // Smart endpointing instead of a fixed 0.4s silence timer: the old timer
+  // cut customers off mid-thought on natural pauses, firing a fresh LLM turn
+  // per fragment (and, worst case, double-firing the checkout tool). The ML
+  // plan waits until the customer is actually done. `vapi` provider keeps it
+  // working for Hindi/Hinglish (livekit is English-only).
+  startSpeakingPlan: {
+    waitSeconds: 0.8,
+    smartEndpointingPlan: { provider: 'vapi' },
+  },
   numWordsToInterruptAssistant: 2,
   backchannelingEnabled: true,
   endCallPhrases: ['bye', 'goodbye', 'thank you bye', 'alvida', 'rakhti hoon'],

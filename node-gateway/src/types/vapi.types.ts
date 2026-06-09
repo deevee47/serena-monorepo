@@ -126,9 +126,22 @@ export interface VapiAssistantOverrides {
   /** Hang up if the customer has been silent for this many seconds. Sales
    *  pace prefers 12s; Vapi default is 30s. */
   silenceTimeoutSeconds?: number;
-  /** Time the assistant waits before responding once the customer stops
-   *  speaking. Lower = snappier; too low = it cuts the customer off. */
-  responseDelaySeconds?: number;
+  /** Turn-taking / endpointing. `smartEndpointingPlan` uses an ML model to
+   *  decide when the customer has *actually* finished, so a mid-sentence pause
+   *  ("...because, <pause> it was too expensive") no longer fires a separate
+   *  LLM turn the way a fixed silence timer (the old `responseDelaySeconds`)
+   *  did. Smart endpointing takes precedence over transcription heuristics.
+   *  `provider: 'vapi'` is multilingual (incl. Hindi/Hinglish); `'livekit'`
+   *  is English-only — keep `'vapi'` for this bilingual agent.
+   *  https://docs.vapi.ai/customization/voice-pipeline-configuration */
+  startSpeakingPlan?: {
+    /** Minimum silence before the assistant may respond. A floor, not a hard
+     *  wait — the smart plan extends it dynamically. Default 0.4, max 5. */
+    waitSeconds?: number;
+    smartEndpointingPlan?: {
+      provider: 'vapi' | 'livekit' | 'custom-endpointing-model';
+    };
+  };
   /** How many words of customer speech triggers a barge-in. 2 keeps it
    *  feeling like a real conversation; default ~3-4 is too tolerant. */
   numWordsToInterruptAssistant?: number;

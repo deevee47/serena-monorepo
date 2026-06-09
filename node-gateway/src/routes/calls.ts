@@ -8,6 +8,7 @@ import { AppError, ErrorCodes } from '../utils/errors.js';
 import { getVoiceProvider, voiceProvider, type ProviderName } from '../services/voice-provider/index.js';
 import type { CallLocale } from '../services/voice-provider/types.js';
 import { generateOpener, type CallMode } from '../services/opener.service.js';
+import { getSession, updateSession } from '../services/session.service.js';
 
 function parseProviderOverride(value: unknown): ProviderName | null {
   return value === 'vapi' || value === 'telnyx' ? value : null;
@@ -27,6 +28,12 @@ const triggerSchema = z.object({
   metadata: z.record(z.string(), z.unknown()).optional(),
   /** Optional dashboard-driven override; falls back to VOICE_PROVIDER env. */
   provider: z.enum(['vapi', 'telnyx']).optional(),
+});
+
+const webContextSchema = z.object({
+  call_id: z.string().min(1),
+  /** Null/omitted for product-agnostic inbound web calls. */
+  product_id: z.string().min(1).nullish(),
 });
 
 async function resolveLocale(phoneNumber: string): Promise<CallLocale> {
@@ -140,7 +147,7 @@ export default async function callsRoutes(app: FastifyInstance) {
       return reply.status(403).send({ error: { code: 'FORBIDDEN', message: 'Invalid admin secret' } });
     }
     const body = request.body as
-      | { mode?: CallMode; product_id?: string | null }
+      | { mode?: CallMode; product_id?: string | null; language?: string }
       | undefined;
     const mode = body?.mode === 'INBOUND_PRESALES' || body?.mode === 'OUTBOUND_RECOVERY'
       ? body.mode
@@ -150,8 +157,57 @@ export default async function callsRoutes(app: FastifyInstance) {
         error: { code: ErrorCodes.INVALID_PAYLOAD, message: 'mode must be INBOUND_PRESALES or OUTBOUND_RECOVERY' },
       });
     }
-    const opener = await generateOpener({ mode, productId: body?.product_id ?? null });
+    const language = body?.language === 'hi' ? 'hi' : 'en';
+    const opener = await generateOpener({ mode, productId: body?.product_id ?? null, language });
     return reply.send({ opener });
+  });
+
+  // Web-call product binding. A browser Vapi call (the /talk page) is started
+  // with a client-side `assistantId` and the selected product only in
+  // `vapi.start` overrides — which Vapi does NOT reliably forward to our
+  // Custom LLM endpoint (unlike a PSTN call created via POST /call/phone,
+  // whose top-level `metadata` round-trips as `call.metadata`). Without this,
+  // `ensureSessionForCall` sees no product and defaults to `prod-001`, so the
+  // agent opens about the product the caller picked (client-rendered opener)
+  // but answers about the default. The dashboard calls this right after
+  // `vapi.start` returns the call id; we stash the same `pending_call:<id>`
+  // entry `/calls/trigger` writes, which `ensureSessionForCall` reads first.
+  app.post('/calls/web-context', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!checkAdminSecret(request.headers)) {
+      return reply.status(403).send({ error: { code: 'FORBIDDEN', message: 'Invalid admin secret' } });
+    }
+    const parsed = webContextSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(422).send({
+        error: { code: ErrorCodes.INVALID_PAYLOAD, message: 'Invalid request body', details: parsed.error.flatten() },
+      });
+    }
+    const { call_id, product_id } = parsed.data;
+    if (!product_id) {
+      // Inbound web calls start product-agnostic — nothing to bind.
+      return reply.status(204).send();
+    }
+
+    await redis.setex(
+      `pending_call:${call_id}`,
+      60,
+      JSON.stringify({ productId: product_id, triggerReason: 'web_talk' }),
+    );
+
+    // Race guard: the first LLM turn normally lands several seconds after
+    // `vapi.start` (opener TTS + the caller's first reply), so the binding
+    // above is read at session-create time. But if a session already exists
+    // (reconnect, or an unusually fast first turn) the pending_call entry will
+    // never be re-read — patch the live session directly so the product still
+    // takes effect.
+    const existing = await getSession(call_id).catch(() => null);
+    if (existing && existing.currentProductId !== product_id) {
+      await updateSession(call_id, { currentProductId: product_id }).catch((err) =>
+        request.log.warn({ err, call_id }, 'web-context: live session product patch failed'),
+      );
+    }
+
+    return reply.status(204).send();
   });
 
   app.get(

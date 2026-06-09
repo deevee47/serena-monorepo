@@ -1,24 +1,61 @@
-import { describe, it, expect } from 'bun:test';
+import { describe, it, expect, beforeEach } from 'bun:test';
 import {
   detectFillerLanguage,
+  fillerPoolFor,
   isDisfluencyOpener,
   thinkingFillerFor,
+  _resetFillerRotationForTest,
 } from '../../src/services/thinking-filler.js';
 
 describe('thinkingFillerFor', () => {
-  it('returns the english filler for known tools', () => {
-    expect(thinkingFillerFor('get_review_summary', 'en')).toContain('what folks have said');
-    expect(thinkingFillerFor('check_inventory', 'en')).toContain('checking stock');
+  beforeEach(() => _resetFillerRotationForTest());
+
+  it('always returns a line from the tool/lang pool', () => {
+    for (let i = 0; i < 30; i++) {
+      const en = thinkingFillerFor('get_review_summary', 'en');
+      expect(fillerPoolFor('get_review_summary', 'en')).toContain(en);
+      const hi = thinkingFillerFor('check_inventory', 'hi');
+      expect(fillerPoolFor('check_inventory', 'hi')).toContain(hi);
+    }
   });
 
-  it('returns the hindi filler when lang=hi', () => {
-    expect(thinkingFillerFor('get_review_summary', 'hi')).toContain('dekh ke batati hoon');
-    expect(thinkingFillerFor('check_inventory', 'hi')).toContain('stock');
+  it('uses the right language pool', () => {
+    const hi = thinkingFillerFor('get_review_summary', 'hi');
+    expect(fillerPoolFor('get_review_summary', 'hi')).toContain(hi);
+    expect(fillerPoolFor('get_review_summary', 'en')).not.toContain(hi);
   });
 
-  it('falls back to a generic filler for unknown tools', () => {
-    expect(thinkingFillerFor('something_new', 'en')).toMatch(/sec/);
-    expect(thinkingFillerFor('something_new', 'hi')).toMatch(/ek second/);
+  it('rotates for variety — not the same line every time', () => {
+    const seen = new Set<string>();
+    for (let i = 0; i < 30; i++) seen.add(thinkingFillerFor('get_available_offers', 'hi'));
+    expect(seen.size).toBeGreaterThan(1);
+  });
+
+  it('never repeats the same line twice in a row', () => {
+    let prev = '';
+    for (let i = 0; i < 40; i++) {
+      const next = thinkingFillerFor('get_review_summary', 'hi');
+      expect(next).not.toBe(prev);
+      prev = next;
+    }
+  });
+
+  it('falls back to the generic pool for unknown tools', () => {
+    const en = thinkingFillerFor('something_new', 'en');
+    expect(fillerPoolFor('default', 'en')).toContain(en);
+    const hi = thinkingFillerFor('something_new', 'hi');
+    expect(fillerPoolFor('default', 'hi')).toContain(hi);
+  });
+
+  it('every filler keeps the leading + trailing space Vapi TTS needs', () => {
+    for (const tool of ['get_review_summary', 'get_available_offers', 'default']) {
+      for (const lang of ['en', 'hi'] as const) {
+        for (const line of fillerPoolFor(tool, lang)) {
+          expect(line.startsWith(' ')).toBe(true);
+          expect(line.endsWith(' ')).toBe(true);
+        }
+      }
+    }
   });
 });
 

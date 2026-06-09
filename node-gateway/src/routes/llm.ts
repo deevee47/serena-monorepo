@@ -506,6 +506,10 @@ async function llmCompletionsHandler(request: FastifyRequest, reply: FastifyRepl
       // matching observation event. Tools that don't fire `thinking` (none
       // today, but future-safe) just won't produce a latency entry.
       const pendingThinking: Map<string, number> = new Map();
+      // At most ONE spoken filler per turn. A turn that fires several tools
+      // (e.g. get_review_summary + get_available_offers) would otherwise stack
+      // "ek minute… — ek second… —" into one breath, which sounds repetitive.
+      let fillerEmittedThisTurn = false;
 
       // Filler language: prefer the customer's actual reply, fall back to timezone.
       const fillerLang = detectFillerLanguage({
@@ -538,7 +542,12 @@ async function llmCompletionsHandler(request: FastifyRequest, reply: FastifyRepl
               publishLive(callId, { type: 'text_delta', delta });
             },
             onThinking: (toolName) => {
+              // Always record the timestamp so EVERY tool's latency is measured,
+              // even tools whose filler we end up suppressing below.
               pendingThinking.set(toolName, Date.now());
+              // One filler per turn — don't stack a second "checking…" cue when
+              // the brain fires multiple tools in the same turn.
+              if (fillerEmittedThisTurn) return;
               // Suppress if the LLM already opened with its own disfluency cue —
               // stacked "hmm — let me check —" sounds wrong.
               if (isDisfluencyOpener(fullText)) return;
@@ -552,6 +561,7 @@ async function llmCompletionsHandler(request: FastifyRequest, reply: FastifyRepl
               }
               const filler = thinkingFillerFor(toolName, fillerLang);
               fullText += filler;
+              fillerEmittedThisTurn = true;
               sendChunk({ content: filler });
               publishLive(callId, { type: 'text_delta', delta: filler });
               publishLive(callId, { type: 'status', status: 'thinking', tool: toolName });

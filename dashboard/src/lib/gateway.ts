@@ -209,6 +209,8 @@ export type CallMode = 'INBOUND_PRESALES' | 'OUTBOUND_RECOVERY';
 export async function generateOpener(input: {
   mode: CallMode;
   product_id?: string | null;
+  /** Language the agent opens in ('en' | 'hi'). Defaults to English. */
+  language?: 'en' | 'hi';
 }): Promise<string | null> {
   try {
     const res = await fetch(`${GATEWAY_URL}/calls/opener`, {
@@ -222,6 +224,33 @@ export async function generateOpener(input: {
     return body?.opener ?? null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Bind a web call's selected product (and mode) to the gateway session.
+ *
+ * Vapi web calls don't reliably round-trip `vapi.start` metadata to our
+ * Custom LLM endpoint, so the gateway would otherwise default the product and
+ * the agent would answer about the wrong item. This writes the same
+ * `pending_call:<id>` entry that `/calls/trigger` uses, which the gateway
+ * reads first when it lazily creates the session on the first LLM turn.
+ * Fire-and-forget from the caller's POV — returns false on any failure.
+ */
+export async function bindWebCallContext(input: {
+  call_id: string;
+  product_id?: string | null;
+}): Promise<boolean> {
+  try {
+    const res = await fetch(`${GATEWAY_URL}/calls/web-context`, {
+      method: 'POST',
+      headers: adminHeaders(),
+      body: JSON.stringify(input),
+      cache: 'no-store',
+    });
+    return res.ok;
+  } catch {
+    return false;
   }
 }
 

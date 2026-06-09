@@ -63,6 +63,32 @@ describe('generateOpener', () => {
     expect(samples.some((s) => s.includes('10% off if you wrap today'))).toBe(true);
   });
 
+  it('returns a Hindi inbound greeting when language=hi', async () => {
+    const opener = await generateOpener({ mode: 'INBOUND_PRESALES', language: 'hi' });
+    expect(opener).toBe('Serena se Sera bol rahi hoon — kaise help kar sakti hoon?');
+  });
+
+  it('opens an outbound call in Hindi when language=hi', async () => {
+    nextOffer = null;
+    const samples = await Promise.all(
+      Array.from({ length: 50 }, () =>
+        generateOpener({ mode: 'OUTBOUND_RECOVERY', productId: 'prod-001', language: 'hi' }),
+      ),
+    );
+    // Every Hindi render carries the Hindi persona phrasing and never the
+    // English opener stem. ('bataiye' is common to all non-offer HI templates.)
+    expect(samples.every((s) => s.includes('bataiye'))).toBe(true);
+    expect(samples.some((s) => s.includes('Hey there'))).toBe(false);
+    // The product name still weaves into some Hindi render.
+    expect(samples.some((s) => s.includes('ZephyrChair Pro'))).toBe(true);
+  });
+
+  it('defaults to English when language is omitted', async () => {
+    nextOffer = null;
+    const opener = await generateOpener({ mode: 'INBOUND_PRESALES' });
+    expect(opener).toBe('Serena, this is Sera — how can I help?');
+  });
+
   it('falls back to a safe greeting when no template renders', async () => {
     // Force the offer-gated template out of contention and ensure the
     // fallback path (used by pickWeighted when candidates is empty) is at

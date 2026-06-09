@@ -12,35 +12,105 @@
  * thinking-aloud cues stacked.
  */
 
-const FILLERS_EN: Record<string, string> = {
-  get_review_summary: " let me check what folks have said — ",
-  get_recent_purchases: " one sec, pulling that up — ",
-  get_review_summary_alt: " hmm, let me look — ",
-  get_available_offers: " let me see what I can pair with that — ",
-  check_inventory: " one sec, checking stock — ",
-  get_delivery_eta: " let me check the shipping — ",
-  list_products: " let me see what we have — ",
-  default: " one sec — ",
+// Each tool gets a POOL of interchangeable fillers, not one fixed line — so
+// the agent doesn't say the exact same "offers check kar rahi hoon —" every
+// single time. thinkingFillerFor() picks one at random and avoids repeating
+// the previous pick for that tool (see lastPickIndex below). Combined with the
+// one-filler-per-turn rule in routes/llm.ts, this kills the "ek minute… —
+// ek second… — check kar rahi hoon…" stacking the customer used to hear.
+const FILLERS_EN: Record<string, string[]> = {
+  get_review_summary: [
+    " let me check what folks have said — ",
+    " lemme pull up the reviews — ",
+    " one sec, seeing what buyers think — ",
+  ],
+  get_recent_purchases: [
+    " one sec, pulling that up — ",
+    " hold on, looking that up — ",
+  ],
+  get_available_offers: [
+    " let me see what I can pair with that — ",
+    " hold on, checking the deals — ",
+    " lemme look at the bundles — ",
+  ],
+  check_inventory: [
+    " one sec, checking stock — ",
+    " hold on, checking what's in stock — ",
+  ],
+  get_delivery_eta: [
+    " let me check the shipping — ",
+    " one sec, checking delivery — ",
+  ],
+  list_products: [
+    " let me see what we have — ",
+    " one sec, pulling up the options — ",
+  ],
+  default: [" one sec — ", " hold on — ", " gimme a sec — "],
 };
 
-const FILLERS_HI: Record<string, string> = {
-  get_review_summary: " ek minute, dekh ke batati hoon — ",
-  get_recent_purchases: " ek second, pull kar rahi hoon — ",
-  get_available_offers: " ek minute, offers check kar rahi hoon — ",
-  check_inventory: " ek second, stock dekh leti hoon — ",
-  get_delivery_eta: " ek minute, delivery check karti hoon — ",
-  list_products: " ek second, batati hoon kya kya hai — ",
-  default: " ek second — ",
+const FILLERS_HI: Record<string, string[]> = {
+  get_review_summary: [
+    " ek minute, dekh ke batati hoon — ",
+    " ruko zara, reviews dekh rahi hoon — ",
+    " ek second, log kya keh rahe hain dekhti hoon — ",
+  ],
+  get_recent_purchases: [
+    " ek second, pull kar rahi hoon — ",
+    " ruko zara, dekh rahi hoon — ",
+  ],
+  get_available_offers: [
+    " offers dekh rahi hoon — ",
+    " ruko, kya bundle ban sakta hai dekhti hoon — ",
+    " ek second, deals check kar rahi hoon — ",
+  ],
+  check_inventory: [
+    " ek second, stock dekh leti hoon — ",
+    " ruko, stock dekh rahi hoon — ",
+  ],
+  get_delivery_eta: [
+    " ek minute, delivery check karti hoon — ",
+    " ruko, shipping dekh rahi hoon — ",
+  ],
+  list_products: [
+    " ek second, batati hoon kya kya hai — ",
+    " ruko, options dekh rahi hoon — ",
+  ],
+  default: [" ek second — ", " ruko zara — ", " haan, dekhti hoon — "],
 };
 
 export type FillerLanguage = 'en' | 'hi';
 
-/** Pick a filler for an observation tool. Picks Hindi for Hinglish/Hindi
- *  callers, English otherwise. The leading + trailing space matters — Vapi
- *  TTS streams these inline as SSE deltas. */
-export function thinkingFillerFor(toolName: string, lang: FillerLanguage): string {
+/** The candidate fillers for a tool in a language. Falls back to the generic
+ *  pool for tools we don't have bespoke lines for. */
+export function fillerPoolFor(toolName: string, lang: FillerLanguage): readonly string[] {
   const table = lang === 'hi' ? FILLERS_HI : FILLERS_EN;
   return table[toolName] ?? table['default']!;
+}
+
+/** Remembers the last pool index used per `lang:tool` so we never play the
+ *  exact same line twice in a row. Process-local and best-effort — it only
+ *  drives phrasing variety, so a reset (or a race across concurrent calls)
+ *  costs nothing but a slightly less varied filler. */
+const lastPickIndex: Map<string, number> = new Map();
+
+/** Pick a filler for an observation tool. Hindi for Hinglish/Hindi callers,
+ *  English otherwise. Rotates within the tool's pool, skipping the previous
+ *  pick so it doesn't immediately repeat. The leading + trailing space
+ *  matters — Vapi TTS streams these inline as SSE deltas. */
+export function thinkingFillerFor(toolName: string, lang: FillerLanguage): string {
+  const pool = fillerPoolFor(toolName, lang);
+  if (pool.length === 1) return pool[0]!;
+  const key = `${lang}:${toolName}`;
+  const prev = lastPickIndex.get(key);
+  let idx = Math.floor(Math.random() * pool.length);
+  if (idx === prev) idx = (idx + 1) % pool.length; // avoid an immediate repeat
+  lastPickIndex.set(key, idx);
+  return pool[idx]!;
+}
+
+/** Test-only: reset the rotation memory so variety assertions are deterministic. */
+export function _resetFillerRotationForTest(): void {
+  lastPickIndex.clear();
 }
 
 /** Heuristic for which language to use for the filler. Indian timezones get
