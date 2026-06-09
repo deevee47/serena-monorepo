@@ -21,7 +21,10 @@ export async function renameCallAction(
       where: { callId },
       data: { name: trimmed.length > 0 ? trimmed : null },
     });
-  } catch {
+  } catch (err) {
+    // Surface the real reason in the server log — e.g. a stale Prisma client
+    // (dev server started before the `name` migration) rejects the arg.
+    console.error('renameCall failed', err);
     return { ok: false };
   }
   revalidatePath('/calls');

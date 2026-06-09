@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useState, useTransition } from 'react';
+import { useRef, useState } from 'react';
 import { renameCallAction } from '@/app/(app)/calls/actions';
 import { cn } from '@/lib/utils';
 
@@ -28,26 +28,33 @@ export function CallNameEditor({
 }: CallNameEditorProps) {
   const [value, setValue] = useState(name ?? defaultName);
   const lastSaved = useRef(name ?? defaultName);
-  const [isPending, startTransition] = useTransition();
+  const [saving, setSaving] = useState(false);
 
-  function commit() {
+  async function commit() {
     const trimmed = value.trim();
     // Empty or the unchanged default → no custom name (store null).
     const toStore = trimmed === '' || trimmed === defaultName ? '' : trimmed;
     const display = toStore === '' ? defaultName : toStore;
     setValue(display);
     if (display === lastSaved.current) return; // nothing changed
+    const prev = lastSaved.current;
     lastSaved.current = display;
-    startTransition(() => {
-      void renameCallAction(callId, toStore);
-    });
+    setSaving(true);
+    const res = await renameCallAction(callId, toStore).catch(() => ({ ok: false }));
+    setSaving(false);
+    if (!res.ok) {
+      // Write failed — roll back so the field shows what's actually stored
+      // (instead of silently looking saved and reverting on refresh).
+      lastSaved.current = prev;
+      setValue(prev);
+    }
   }
 
   return (
     <input
       value={value}
       onChange={(e) => setValue(e.target.value)}
-      onBlur={commit}
+      onBlur={() => void commit()}
       onKeyDown={(e) => {
         if (e.key === 'Enter') e.currentTarget.blur();
         if (e.key === 'Escape') {
@@ -65,7 +72,7 @@ export function CallNameEditor({
         variant === 'heading'
           ? 'px-2 py-1 text-lg font-semibold tracking-tight'
           : 'px-1.5 py-1 text-sm',
-        isPending && 'opacity-60',
+        saving && 'opacity-60',
       )}
     />
   );

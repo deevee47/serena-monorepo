@@ -153,8 +153,7 @@ export default async function CallsPage({
               <TableHeader>
                 <TableRow>
                   <TableHead>When</TableHead>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Customer</TableHead>
+                  <TableHead className="w-[34rem]">Name</TableHead>
                   <TableHead>Product</TableHead>
                   <TableHead>Platform</TableHead>
                   <TableHead>Discount</TableHead>
@@ -166,7 +165,7 @@ export default async function CallsPage({
               <TableBody>
                 {calls.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={9} className="text-center text-muted-foreground">
+                    <TableCell colSpan={8} className="text-center text-muted-foreground">
                       No calls match these filters.
                     </TableCell>
                   </TableRow>
@@ -181,15 +180,12 @@ export default async function CallsPage({
                           {formatRelative(call.createdAt)}
                         </Link>
                       </TableCell>
-                      <TableCell className="min-w-44 max-w-64">
+                      <TableCell className="w-[34rem] min-w-96">
                         <CallNameEditor
                           callId={call.callId}
                           name={call.name}
                           defaultName={call.defaultName}
                         />
-                      </TableCell>
-                      <TableCell>
-                        {call.customerName ?? call.phoneNumber ?? 'Anonymous'}
                       </TableCell>
                       <TableCell className="text-muted-foreground">
                         {call.productId ?? '—'}
