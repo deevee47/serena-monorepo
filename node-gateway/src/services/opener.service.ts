@@ -45,9 +45,13 @@ const OUTBOUND_OPENERS_EN: OpenerTemplate[] = [
   {
     weight: 35,
     build: (c) => {
+      // Only tease a deal when one genuinely exists — but DON'T state a
+      // number. The opener stays non-committal ("a deal") so the agent never
+      // promises a specific percentage it might not apply; the actual offer is
+      // surfaced later in-call once the customer is engaged.
       if (!c.activeOffer) return null;
       const ref = c.productName ? ` saw you on the ${c.productName}.` : '';
-      return `Hey there, ${AGENT_NAME} at ${BUSINESS_NAME} —${ref} Quick one — ${c.activeOffer.shortPitch}. Want to hear about it?`;
+      return `Hey there, ${AGENT_NAME} at ${BUSINESS_NAME} —${ref} I might be able to pull up a deal for you — want me to take a look?`;
     },
   },
   {
@@ -87,9 +91,11 @@ const OUTBOUND_OPENERS_HI: OpenerTemplate[] = [
   {
     weight: 35,
     build: (c) => {
+      // Tease a deal only when one exists, but without a number (see the EN
+      // counterpart) — keep the opener from committing to a specific percent.
       if (!c.activeOffer) return null;
       const ref = c.productName ? ` aap ${c.productName} dekh rahe the.` : '';
-      return `Hello, ${AGENT_NAME} yahan ${BUSINESS_NAME} se —${ref} ek quick baat — ${c.activeOffer.shortPitch}. sunna chahenge?`;
+      return `Hello, ${AGENT_NAME} yahan ${BUSINESS_NAME} se —${ref} shayad main aapke liye koi deal nikaal sakti hoon — dekh loon?`;
     },
   },
   {

@@ -54,4 +54,49 @@ describe('createAsyncMemo', () => {
 
     expect(calls).toBe(2);
   });
+
+  it('collapses concurrent gets for the same key into ONE compute', async () => {
+    const memo = createAsyncMemo<string>();
+    let calls = 0;
+    const compute = async () => {
+      calls++;
+      await new Promise((r) => setTimeout(r, 10));
+      return 'v';
+    };
+
+    const [a, b] = await Promise.all([memo.get('k', compute), memo.get('k', compute)]);
+
+    expect(a).toBe('v');
+    expect(b).toBe('v');
+    expect(calls).toBe(1);
+  });
+
+  it('with negativeTtlMs, serves a cached null within the TTL window', async () => {
+    const memo = createAsyncMemo<string>({ negativeTtlMs: 1000 });
+    let calls = 0;
+    const computeNull = async () => {
+      calls++;
+      return null;
+    };
+
+    await memo.get('k', computeNull);
+    await memo.get('k', computeNull); // within TTL → no recompute
+
+    expect(calls).toBe(1);
+  });
+
+  it('with negativeTtlMs, recomputes once the TTL has expired', async () => {
+    const memo = createAsyncMemo<string>({ negativeTtlMs: 20 });
+    let calls = 0;
+    const computeNull = async () => {
+      calls++;
+      return null;
+    };
+
+    await memo.get('k', computeNull);
+    await new Promise((r) => setTimeout(r, 40));
+    await memo.get('k', computeNull); // TTL lapsed → recompute
+
+    expect(calls).toBe(2);
+  });
 });

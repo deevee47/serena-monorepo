@@ -64,7 +64,15 @@ export function getCatalogSize(): number {
 // Pinecone round-trip that `llm.ts` awaits before the first spoken token on
 // every turn. Memoize by (productId, reason) so it's paid once per product for
 // the process lifetime instead of once per turn. Cleared on catalog reload.
-const alternativesMemo = createAsyncMemo<ProductContext>();
+//
+// negativeTtlMs: many products have no premium (or no cheaper) alternative, so
+// the lookup legitimately resolves to null — without a negative cache that
+// re-queried the brain every single turn (the logs showed ~0.3-4s wasted per
+// turn on a count=0 premium lookup). We can't pin null forever because the
+// brain's circuit breaker returns an empty `{alternatives:[]}` fallback when
+// it's open, so a transient outage also looks like null; the 60s TTL caps how
+// long such a false "none" sticks (the breaker's resetTimeout is 30s).
+const alternativesMemo = createAsyncMemo<ProductContext>({ negativeTtlMs: 60_000 });
 
 export async function findAlternativeProduct(
   currentProductId: string,

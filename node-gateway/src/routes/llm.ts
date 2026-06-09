@@ -150,6 +150,7 @@ async function llmCompletionsHandler(request: FastifyRequest, reply: FastifyRepl
       { provider: provider.name, header_keys: Object.keys(request.headers) },
       'LLM probe (no call id) — returning stub validation response',
     );
+    reply.hijack();
     reply.raw.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
@@ -459,6 +460,14 @@ async function llmCompletionsHandler(request: FastifyRequest, reply: FastifyRepl
       }
 
       // ── Stream OpenAI-compatible SSE response ──────────────────────────
+      // Hijack first: we own the raw socket from here. We stream SSE ourselves
+      // and then run best-effort bookkeeping AFTER reply.raw.end(). If any of
+      // that throws — e.g. the caller hung up mid-turn and the call-end worker
+      // already deleted the session — the throw must NOT reach Fastify's error
+      // handler, which would try to writeHead on a finished response and crash
+      // with ERR_HTTP_HEADERS_SENT. hijack() takes the reply out of Fastify's
+      // lifecycle so that can't happen.
+      reply.hijack();
       reply.raw.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
@@ -637,19 +646,27 @@ async function llmCompletionsHandler(request: FastifyRequest, reply: FastifyRepl
         log.warn({ err }, 'lastAgentFinishedAt update failed (non-fatal)'),
       );
 
-      // ── Persist turns and update session (best-effort, off the response path)
-      await persistTurnPair({
-        callId,
-        session,
-        utterance,
-        agentText: fullText,
-        dispatch,
-        observations,
-        userResponseLatencyMs: currentUserLatencyMs,
-        observationLatenciesMs:
-          observationLatencies.length > 0 ? observationLatencies : null,
-        recentSignals,
-      });
+      // ── Persist turns and update session (best-effort, off the response path).
+      // Guarded: the call may have ended mid-turn (slow brain / barge-in) and
+      // the call-end worker may have already deleted the session, in which case
+      // persistTurnPair → mutateSession throws SESSION_NOT_FOUND. The SSE reply
+      // is already closed, so we just log and move on — never rethrow.
+      try {
+        await persistTurnPair({
+          callId,
+          session,
+          utterance,
+          agentText: fullText,
+          dispatch,
+          observations,
+          userResponseLatencyMs: currentUserLatencyMs,
+          observationLatenciesMs:
+            observationLatencies.length > 0 ? observationLatencies : null,
+          recentSignals,
+        });
+      } catch (err) {
+        log.warn({ err }, 'persistTurnPair failed post-stream (call likely ended) — non-fatal');
+      }
 
       const discountAmount =
         dispatch?.toolName === 'send_whatsapp_checkout_link'

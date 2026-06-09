@@ -53,14 +53,18 @@ describe('generateOpener', () => {
     expect(samples.some((s) => s.includes('ZephyrChair Pro'))).toBe(true);
   });
 
-  it('weaves the active offer pitch in when one exists', async () => {
+  it('teases an available offer WITHOUT stating a number', async () => {
     nextOffer = { discountPercent: 10, shortPitch: '10% off if you wrap today' };
     const samples = await Promise.all(
       Array.from({ length: 80 }, () =>
         generateOpener({ mode: 'OUTBOUND_RECOVERY', productId: 'prod-001' }),
       ),
     );
-    expect(samples.some((s) => s.includes('10% off if you wrap today'))).toBe(true);
+    // The vague offer teaser shows up when an offer exists…
+    expect(samples.some((s) => /deal/i.test(s))).toBe(true);
+    // …but no opener ever leaks the raw pitch or a specific percentage.
+    expect(samples.every((s) => !s.includes('10% off if you wrap today'))).toBe(true);
+    expect(samples.every((s) => !/\d+\s*%/.test(s))).toBe(true);
   });
 
   it('returns a Hindi inbound greeting when language=hi', async () => {
